@@ -2,6 +2,12 @@
 
 FORi Flower 插花网站的本地前端复刻，参考：https://fori-flower-studio.com/ 。
 
+## 在线体验
+
+[点击体验：FlowerArranging 插花工作室](https://jdb156158.github.io/FlowerArranging/)
+
+[![插花工作室效果截图](docs/preview.png)](https://jdb156158.github.io/FlowerArranging/)
+
 ## 启动
 
 ```sh
@@ -28,4 +34,4 @@ python3 -m http.server 5173 --bind 127.0.0.1
 
 原站的私有投稿、审核和实时作品数据库不在公开前端内。本地作品页读取静态快照；投稿表单会明确提示未连接后台，不会向原站提交。外部官网、Instagram、打印服务链接仍指向对应官方网站。
 
-已移除原域名的 Cloudflare 注入脚本；图片、花材、展厅背景和导出素材均本地提供。尚未部署到公网。
+已移除原域名的 Cloudflare 注入脚本；图片、花材、展厅背景和导出素材均本地提供。已部署到 GitHub Pages，线上地址见上方「在线体验」。

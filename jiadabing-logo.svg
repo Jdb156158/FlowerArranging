@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1478" height="416" viewBox="0 0 1478 416" role="img" aria-labelledby="brand-title">
+  <title id="brand-title">贾大兵 jiadabing</title>
+  <g fill="#111">
+    <path fill="none" stroke="#111" stroke-width="14" d="M127 110h200v200H127z"/>
+    <path d="M199 146h56v98c0 26-15 40-41 40h-26v-25h23c12 0 17-6 17-18v-70h-29z"/>
+    <text x="390" y="270" font-family="PingFang SC,Microsoft YaHei,Noto Sans CJK SC,sans-serif" font-size="138" font-weight="600" letter-spacing="6">贾大兵</text>
+    <text x="850" y="203" font-family="Arial,Helvetica,sans-serif" font-size="106" font-weight="700">jiadabing</text>
+    <text x="854" y="282" font-family="Arial,Helvetica,sans-serif" font-size="38" font-weight="700" letter-spacing="5">PLANT + DESIGN</text>
+  </g>
+</svg>

@@ -1,0 +1,38 @@
+{
+  "date": "2026-09-30",
+  "checks": {
+    "all_javascript_syntax": "pass",
+    "botanical_bitmap_files": 62,
+    "flower_types": 62,
+    "core_files_byte_identical": [
+      "app.js",
+      "style.css",
+      "locale.js",
+      "card.js",
+      "sound.js",
+      "cat.js",
+      "replay.js"
+    ],
+    "browser": [
+      "flower categories and addition",
+      "flower color height angle",
+      "drag updates height and angle",
+      "vessel shape and color",
+      "background switching",
+      "remove: 5 to 4; undo: 4 to 5",
+      "greeting PNG preview 2160x3200",
+      "replay completed with preview and download link",
+      "gallery snapshot: 48 works",
+      "exhibition room switching",
+      "390px mobile iframe layout; add and reset"
+    ],
+    "script_errors_observed": 0
+  },
+  "limitations": [
+    "No original submission or moderation backend",
+    "Community gallery is a snapshot of 48 public works",
+    "PNG download clicked and UI reports success; browser download-event tool timed out, saved file not verified",
+    "Mobile verified in a 390x844 iframe because viewport override was ineffective",
+    "System share and print-file download not independently exercised"
+  ]
+}

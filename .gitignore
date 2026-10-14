@@ -1,0 +1,43 @@
+# macOS
+._*
+.DS_Store
+
+# Local tools and dependencies
+/.gstack/
+/.venv-rembg/
+/node_modules/
+**/__pycache__/
+*.py[cod]
+
+# Runtime output and local state
+/generated/
+/output/
+/tmp/
+/data/mobile-library-state.json
+*.log
+/coverage/
+
+# Design and QA evidence that is not required to build the product
+/audit-*/
+/assets/comparisons/
+/design/yafa-demo-audit-*/
+/design/figma-home-*/qa/
+
+# Xcode user and build state
+**/xcuserdata/
+*.xcuserstate
+**/DerivedData/
+**/build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+**/GoogleService-Info.plist

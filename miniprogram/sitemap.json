@@ -1,0 +1,4 @@
+{
+  "desc": "一束花",
+  "rules": [{ "action": "allow", "page": "*" }]
+}

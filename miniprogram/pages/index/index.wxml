@@ -1,0 +1,163 @@
+<view class="page" style="background:{{bgColor}}">
+  <!-- 顶栏 -->
+  <view class="header" style="padding-top:{{statusBarHeight}}px">
+    <view class="header-bar" style="height:{{navHeight}}px;padding-right:{{navRight}}px">
+      <view class="brand">
+        <view class="brand-logo">花</view>
+        <view class="brand-text">
+          <text class="brand-name">一束花</text>
+          <text class="brand-sub">Flower Arranging</text>
+        </view>
+      </view>
+      <view class="header-actions">
+        <view class="hbtn" bindtap="toggleBackground">
+          <text>背景</text>
+          <text class="hbtn-en">{{backgroundColor==='default'?'Light':'Dark'}}</text>
+        </view>
+        <view class="hbtn" bindtap="resetAll">
+          <text>重新开始</text>
+          <text class="hbtn-en">Start over</text>
+        </view>
+        <view class="hbtn primary" bindtap="finish">
+          <text>完成作品</text>
+          <text class="hbtn-en">Finish</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 画布 -->
+  <view class="stage">
+    <canvas type="2d" id="scene" class="scene" style="{{canvasStyle}}"
+      bindtouchstart="onTouchStart" bindtouchmove="onTouchMove"
+      bindtouchend="onTouchEnd" bindtouchcancel="onTouchEnd"></canvas>
+    <view class="empty-hint" wx:if="{{items.length===0}}">
+      <text class="hint-zh">选一枝花材，放入第一枝花</text>
+      <text class="hint-en">Choose a flower to begin.</text>
+    </view>
+    <view class="stage-tools">
+      <view class="tool-left">
+        <text class="tool-link {{history.length?'':'disabled'}}" bindtap="undo">↩ 上一步</text>
+        <text class="tool-link {{selected?'':'disabled'}}" bindtap="deselect">✕ 取消</text>
+      </view>
+      <view class="tool-right">
+        <text>点选花材 · 拖曳调整位置</text>
+        <text class="hint-en">Select a stem · Drag to arrange</text>
+      </view>
+    </view>
+    <view class="count">{{countText}}</view>
+  </view>
+
+  <!-- 底部面板 -->
+  <view class="panel">
+    <view class="panel-tabs">
+      <view class="ptab {{panel==='materials'?'on':''}}" data-p="materials" bindtap="setPanel">
+        <text>选花材</text><text class="ptab-en">Flowers</text>
+      </view>
+      <view class="ptab {{panel==='adjust'?'on':''}}" data-p="adjust" bindtap="setPanel">
+        <text>调整花材</text><text class="ptab-en">Adjust</text>
+      </view>
+      <view class="ptab {{panel==='vase'?'on':''}}" data-p="vase" bindtap="setPanel">
+        <text>容器</text><text class="ptab-en">Vases</text>
+      </view>
+    </view>
+
+    <!-- 选花材 -->
+    <block wx:if="{{panel==='materials'}}">
+      <view class="cats">
+        <view class="cat {{category==='main'?'on':''}}" data-c="main" bindtap="setCategory">主花<text class="cat-en">Main</text></view>
+        <view class="cat {{category==='filler'?'on':''}}" data-c="filler" bindtap="setCategory">配花<text class="cat-en">Fillers</text></view>
+        <view class="cat {{category==='foliage'?'on':''}}" data-c="foliage" bindtap="setCategory">叶材<text class="cat-en">Foliage</text></view>
+      </view>
+      <scroll-view scroll-x class="catalog" enhanced show-scrollbar="{{false}}">
+        <view class="card" wx:for="{{catalog}}" wx:key="id" data-type="{{item.id}}" bindtap="addFlower">
+          <image src="{{item.img}}" mode="aspectFit" class="card-img" lazy-load />
+          <text class="card-name">{{item.name}}</text>
+          <text class="card-en">{{item.en}}</text>
+          <view class="card-add">＋</view>
+        </view>
+      </scroll-view>
+    </block>
+
+    <!-- 调整花材 -->
+    <block wx:if="{{panel==='adjust'}}">
+      <view class="adjust-empty" wx:if="{{!activeItem}}">
+        <text class="ae-plus">＋</text>
+        <text>选一枝，随心调整。</text>
+        <text class="hint-en">Add a stem, then adjust its color, height and angle.</text>
+      </view>
+      <scroll-view scroll-y wx:else class="adjust">
+        <view class="adj-head">
+          <image src="{{activeItem.img}}" mode="aspectFit" class="adj-img" />
+          <view class="adj-titles">
+            <text class="adj-name">{{activeItem.name}}</text>
+            <text class="adj-en">{{activeItem.en}}</text>
+          </view>
+          <view class="adj-btn" bindtap="toBack">置最后</view>
+          <view class="adj-btn" bindtap="toFront">置最前</view>
+          <view class="adj-remove" bindtap="removeSelected">移除 −</view>
+        </view>
+
+        <view class="adj-section" wx:if="{{activeItem.swatches.length}}">
+          <text class="adj-label">颜色 Color</text>
+          <view class="swatches">
+            <view wx:for="{{activeItem.swatches}}" wx:key="index"
+              class="swatch {{item.on?'on':''}}" style="background:{{item.hex}}"
+              data-c="{{index}}" bindtap="setColor"></view>
+          </view>
+        </view>
+        <view class="adj-section adj-no-color" wx:else>
+          <text class="adj-label">颜色 Color</text>
+          <text class="adj-note">此花材颜色固定</text>
+        </view>
+
+        <view class="adj-section">
+          <text class="adj-label">位置 Position</text>
+          <view class="slider-row">
+            <view class="slider-label"><text>花材高度</text><text class="slider-val">{{heightCm}} cm</text></view>
+            <slider min="{{hMin}}" max="390" step="1" value="{{activeItem.h}}"
+              bindchanging="onHeight" bindchange="onSliderEnd" activeColor="#4a6044" block-size="22" />
+          </view>
+          <view class="slider-row">
+            <view class="slider-label"><text>倾斜角度</text><text class="slider-val">{{activeItem.a}}°</text></view>
+            <slider min="-75" max="75" step="1" value="{{activeItem.a}}"
+              bindchanging="onAngle" bindchange="onSliderEnd" activeColor="#4a6044" block-size="22" />
+          </view>
+        </view>
+      </scroll-view>
+    </block>
+
+    <!-- 容器 -->
+    <block wx:if="{{panel==='vase'}}">
+      <view class="cats">
+        <view class="cat {{vesselGroup==='vessel'?'on':''}}" data-g="vessel" bindtap="setVesselGroup">花器<text class="cat-en">Vases</text></view>
+        <view class="cat {{vesselGroup==='bouquet'?'on':''}}" data-g="bouquet" bindtap="setVesselGroup">花束<text class="cat-en">Bouquets</text></view>
+        <view class="cat {{vesselGroup==='imagination'?'on':''}}" data-g="imagination" bindtap="setVesselGroup">想像力<text class="cat-en">Fun</text></view>
+      </view>
+      <scroll-view scroll-x class="catalog" enhanced show-scrollbar="{{false}}">
+        <view class="card vase-card {{item.on?'on':''}}" wx:for="{{vaseCards}}" wx:key="key"
+          data-v="{{item.key}}" bindtap="setVase">
+          <image src="{{item.img}}" mode="aspectFit" class="card-img" lazy-load />
+          <text class="card-name">{{item.name}}</text>
+        </view>
+      </scroll-view>
+      <view class="vase-colors">
+        <text class="vc-label">花器颜色</text>
+        <view wx:for="{{vaseColorChips}}" wx:key="key" class="swatch {{item.on?'on':''}}"
+          style="background:{{item.chip}}" data-vc="{{item.key}}" bindtap="setVaseColor"></view>
+      </view>
+    </block>
+  </view>
+
+  <!-- 完成作品 -->
+  <view class="finish-mask" wx:if="{{finishImg}}">
+    <view class="finish-card" catchtap="noop">
+      <image src="{{finishImg}}" mode="aspectFit" class="finish-img" />
+      <view class="finish-actions">
+        <view class="fbtn primary" bindtap="saveFinish">保存到相册</view>
+        <view class="fbtn" bindtap="closeFinish">继续插花</view>
+      </view>
+    </view>
+    <view class="finish-close" style="top:{{statusBarHeight + navHeight + 8}}px" bindtap="closeFinish">✕</view>
+  </view>
+</view>

@@ -1,0 +1,956 @@
+const __modules = {};
+function require(p){
+  const map = {'./svgpath.js':'svgpath','./manifest.js':'manifest','./flowers-data.js':'data','./vases.js':'vases','./renderer.js':'renderer'};
+  return __modules[map[p] || p];
+}
+__modules['svgpath'] = (function(module, exports){
+// 极简 SVG path 解释器：把 path d 字符串播放到 CanvasRenderingContext2D
+// 支持 M/m L/l H/h V/v C/c Q/q T/t A/a Z/z（圆弧按 SVG 规范转贝塞尔）
+function tokenize(d) {
+  const re = /[MmLlHhVvCcQqTtAaZz]|-?(?:\d*\.\d+|\d+)(?:e[-+]?\d+)?/g;
+  return d.match(re) || [];
+}
+
+function arcToBeziers(cx, cy, rx, ry, phi, start, sweep) {
+  // 中心参数化 → 三次贝塞尔段列表 [x1,y1,x2,y2,x,y]
+  const segs = [];
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2)));
+  const delta = sweep / n;
+  const cosPhi = Math.cos(phi), sinPhi = Math.sin(phi);
+  for (let i = 0; i < n; i++) {
+    const t1 = start + i * delta, t2 = t1 + delta;
+    const a = t1, b = t2;
+    const alpha = 4 / 3 * Math.tan((b - a) / 4);
+    const x1 = Math.cos(a), y1 = Math.sin(a);
+    const x2 = Math.cos(b), y2 = Math.sin(b);
+    const p = [
+      [x1, y1],
+      [x1 - alpha * y1, y1 + alpha * x1],
+      [x2 + alpha * y2, y2 - alpha * x2],
+      [x2, y2],
+    ];
+    const map = ([ux, uy]) => [
+      cx + rx * ux * cosPhi - ry * uy * sinPhi,
+      cy + rx * ux * sinPhi + ry * uy * cosPhi,
+    ];
+    const q = p.map(map);
+    segs.push([q[1][0], q[1][1], q[2][0], q[2][1], q[3][0], q[3][1]]);
+  }
+  return segs;
+}
+
+function endpointArc(cx0, cy0, rx, ry, phiDeg, laf, sf, x, y) {
+  // SVG endpoint → center 参数化（F.6.5）
+  if (rx === 0 || ry === 0) return null;
+  const phi = phiDeg * Math.PI / 180;
+  const cosPhi = Math.cos(phi), sinPhi = Math.sin(phi);
+  const dx = (cx0 - x) / 2, dy = (cy0 - y) / 2;
+  let x1p = cosPhi * dx + sinPhi * dy;
+  let y1p = -sinPhi * dx + cosPhi * dy;
+  rx = Math.abs(rx); ry = Math.abs(ry);
+  let lam = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry);
+  if (lam > 1) { const s = Math.sqrt(lam); rx *= s; ry *= s; }
+  const sign = laf !== sf ? 1 : -1;
+  let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  num = Math.max(0, num);
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  const co = sign * Math.sqrt(num / den);
+  const cxp = co * rx * y1p / ry, cyp = -co * ry * x1p / rx;
+  const cx = cosPhi * cxp - sinPhi * cyp + (cx0 + x) / 2;
+  const cy = sinPhi * cxp + cosPhi * cyp + (cy0 + y) / 2;
+  const ang = (ux, uy, vx, vy) => {
+    const dot = ux * vx + uy * vy;
+    const len = Math.sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
+    let a = Math.acos(Math.min(1, Math.max(-1, dot / len)));
+    if (ux * vy - uy * vx < 0) a = -a;
+    return a;
+  };
+  const t1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dt = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!sf && dt > 0) dt -= 2 * Math.PI;
+  if (sf && dt < 0) dt += 2 * Math.PI;
+  return arcToBeziers(cx, cy, rx, ry, phi, t1, dt);
+}
+
+// 把 path 字符串写入 ctx（不 beginPath，由调用方控制）
+function pathTo(ctx, d) {
+  const t = tokenize(d);
+  let i = 0, cmd = '', x = 0, y = 0, sx = 0, sy = 0, qx = 0, qy = 0;
+  const num = () => parseFloat(t[i++]);
+  while (i < t.length) {
+    if (/[A-Za-z]/.test(t[i])) cmd = t[i++];
+    const rel = cmd >= 'a' && cmd <= 'z';
+    const C = cmd.toUpperCase();
+    switch (C) {
+      case 'M': {
+        let nx = num(), ny = num();
+        if (rel) { nx += x; ny += y; }
+        x = nx; y = ny;
+        ctx.moveTo(x, y); sx = x; sy = y;
+        cmd = rel ? 'l' : 'L';
+        break;
+      }
+      case 'L': {
+        let nx = num(), ny = num();
+        if (rel) { nx += x; ny += y; }
+        ctx.lineTo(nx, ny); x = nx; y = ny; break;
+      }
+      case 'H': {
+        let nx = num(); if (rel) nx += x;
+        ctx.lineTo(nx, y); x = nx; break;
+      }
+      case 'V': {
+        let ny = num(); if (rel) ny += y;
+        ctx.lineTo(x, ny); y = ny; break;
+      }
+      case 'C': {
+        let x1 = num(), y1 = num(), x2 = num(), y2 = num(), nx = num(), ny = num();
+        if (rel) { x1 += x; y1 += y; x2 += x; y2 += y; nx += x; ny += y; }
+        ctx.bezierCurveTo(x1, y1, x2, y2, nx, ny); x = nx; y = ny; break;
+      }
+      case 'Q': {
+        let x1 = num(), y1 = num(), nx = num(), ny = num();
+        if (rel) { x1 += x; y1 += y; nx += x; ny += y; }
+        ctx.quadraticCurveTo(x1, y1, nx, ny); qx = x1; qy = y1; x = nx; y = ny; break;
+      }
+      case 'T': {
+        let nx = num(), ny = num();
+        if (rel) { nx += x; ny += y; }
+        const rx1 = 2 * x - qx, ry1 = 2 * y - qy;
+        ctx.quadraticCurveTo(rx1, ry1, nx, ny); qx = rx1; qy = ry1; x = nx; y = ny; break;
+      }
+      case 'A': {
+        const rx = num(), ry = num(), rot = num(), laf = num(), sf = num();
+        let nx = num(), ny = num();
+        if (rel) { nx += x; ny += y; }
+        const segs = endpointArc(x, y, rx, ry, rot, laf, sf, nx, ny);
+        if (!segs) ctx.lineTo(nx, ny);
+        else for (const s of segs) ctx.bezierCurveTo(s[0], s[1], s[2], s[3], s[4], s[5]);
+        x = nx; y = ny; break;
+      }
+      case 'Z': {
+        ctx.closePath(); x = sx; y = sy; break;
+      }
+      default:
+        i++;
+    }
+  }
+}
+
+module.exports = { pathTo };
+
+return module.exports;
+})({exports:{}});
+__modules['manifest'] = (function(module, exports){
+
+module.exports = {"doublelisianthus_c0_v0":{"f":"doublelisianthus_c0_v0.webp","p":"flowerpack","w":50.5,"h":64.5,"ax":0.4356,"ay":0.4419,"px":[101,129],"m":"head"},"doublelisianthus_c1_v0":{"f":"doublelisianthus_c1_v0.webp","p":"flowerpack","w":50.5,"h":64.5,"ax":0.4356,"ay":0.4419,"px":[101,129],"m":"head"},"doublelisianthus_c2_v0":{"f":"doublelisianthus_c2_v0.webp","p":"flowerpack","w":50.5,"h":64.5,"ax":0.4158,"ay":0.4419,"px":[101,129],"m":"head"},"doublelisianthus_c3_v0":{"f":"doublelisianthus_c3_v0.webp","p":"flowerpack","w":50.5,"h":64.5,"ax":0.4158,"ay":0.4419,"px":[101,129],"m":"head"},"doublelisianthus_c4_v0":{"f":"doublelisianthus_c4_v0.webp","p":"flowerpack","w":50.5,"h":64.5,"ax":0.4356,"ay":0.4419,"px":[101,129],"m":"head"},"doublelisianthus_c0_v1":{"f":"doublelisianthus_c0_v1.webp","p":"flowerpack","w":70.0,"h":80.0,"ax":0.4143,"ay":0.55,"px":[140,160],"m":"head"},"doublelisianthus_c1_v1":{"f":"doublelisianthus_c1_v1.webp","p":"flowerpack","w":69.5,"h":80.0,"ax":0.4101,"ay":0.55,"px":[139,160],"m":"head"},"doublelisianthus_c2_v1":{"f":"doublelisianthus_c2_v1.webp","p":"flowerpack","w":69.5,"h":80.0,"ax":0.4245,"ay":0.55,"px":[139,160],"m":"head"},"doublelisianthus_c3_v1":{"f":"doublelisianthus_c3_v1.webp","p":"flowerpack","w":69.5,"h":80.0,"ax":0.4245,"ay":0.55,"px":[139,160],"m":"head"},"doublelisianthus_c4_v1":{"f":"doublelisianthus_c4_v1.webp","p":"flowerpack","w":69.5,"h":80.0,"ax":0.4101,"ay":0.55,"px":[139,160],"m":"head"},"minirose_c0":{"f":"minirose_c0.webp","p":"flowerpack","w":65.0,"h":57.0,"ax":0.4846,"ay":0.4561,"px":[130,114],"m":"head"},"minirose_c1":{"f":"minirose_c1.webp","p":"flowerpack","w":65.0,"h":57.0,"ax":0.5,"ay":0.4561,"px":[130,114],"m":"head"},"minirose_c2":{"f":"minirose_c2.webp","p":"flowerpack","w":65.0,"h":57.0,"ax":0.4846,"ay":0.4561,"px":[130,114],"m":"head"},"minirose_c3":{"f":"minirose_c3.webp","p":"flowerpack","w":65.0,"h":57.0,"ax":0.4846,"ay":0.4561,"px":[130,114],"m":"head"},"minirose_c4":{"f":"minirose_c4.webp","p":"flowerpack","w":65.0,"h":57.0,"ax":0.5,"ay":0.4561,"px":[130,114],"m":"head"},"spidermum_c0":{"f":"spidermum_c0.webp","p":"flowerpack","w":105.5,"h":106.0,"ax":0.4882,"ay":0.4953,"px":[209,210],"m":"head"},"spidermum_c1":{"f":"spidermum_c1.webp","p":"flowerpack","w":105.5,"h":106.0,"ax":0.4787,"ay":0.4953,"px":[209,210],"m":"head"},"feathergerbera_c0":{"f":"feathergerbera_c0.webp","p":"flowerpack","w":89.0,"h":88.0,"ax":0.4888,"ay":0.4886,"px":[178,176],"m":"head"},"feathergerbera_c1":{"f":"feathergerbera_c1.webp","p":"flowerpack","w":89.0,"h":88.0,"ax":0.5,"ay":0.4886,"px":[178,176],"m":"head"},"feathergerbera_c2":{"f":"feathergerbera_c2.webp","p":"flowerpack","w":89.0,"h":88.0,"ax":0.4888,"ay":0.4886,"px":[178,176],"m":"head"},"feathergerbera_c3":{"f":"feathergerbera_c3.webp","p":"flowerpack","w":89.0,"h":88.0,"ax":0.5,"ay":0.4886,"px":[178,176],"m":"head"},"feathergerbera_c4":{"f":"feathergerbera_c4.webp","p":"flowerpack","w":89.0,"h":88.0,"ax":0.5,"ay":0.4886,"px":[178,176],"m":"head"},"poppy_c0_v0":{"f":"poppy_c0_v0.webp","p":"flowerpack","w":86.0,"h":85.5,"ax":0.4709,"ay":0.4854,"px":[172,171],"m":"head"},"poppy_c1_v0":{"f":"poppy_c1_v0.webp","p":"flowerpack","w":86.0,"h":85.5,"ax":0.4709,"ay":0.4854,"px":[172,171],"m":"head"},"poppy_c2_v0":{"f":"poppy_c2_v0.webp","p":"flowerpack","w":86.0,"h":85.5,"ax":0.4826,"ay":0.4854,"px":[172,171],"m":"head"},"poppy_c3_v0":{"f":"poppy_c3_v0.webp","p":"flowerpack","w":86.0,"h":85.5,"ax":0.4709,"ay":0.4854,"px":[172,171],"m":"head"},"poppy_c0_v1":{"f":"poppy_c0_v1.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.5,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c1_v1":{"f":"poppy_c1_v1.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.5132,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c2_v1":{"f":"poppy_c2_v1.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.5132,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c3_v1":{"f":"poppy_c3_v1.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.5,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c0_v2":{"f":"poppy_c0_v2.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.4671,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c1_v2":{"f":"poppy_c1_v2.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.4803,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c2_v2":{"f":"poppy_c2_v2.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.4671,"ay":0.568,"px":[152,125],"m":"head"},"poppy_c3_v2":{"f":"poppy_c3_v2.webp","p":"flowerpack","w":76.0,"h":62.5,"ax":0.4671,"ay":0.568,"px":[152,125],"m":"head"},"laceflower_c0":{"f":"laceflower_c0.webp","p":"flowerpack","w":102.5,"h":125.0,"ax":0.4927,"ay":-0.008,"px":[205,250],"m":"hang"},"sweetpea_c0":{"f":"sweetpea_c0.webp","p":"flowerpack","w":82.5,"h":121.5,"ax":0.4848,"ay":-0.0617,"px":[165,243],"m":"hang"},"sweetpea_c1":{"f":"sweetpea_c1.webp","p":"flowerpack","w":82.5,"h":121.5,"ax":0.4727,"ay":-0.0617,"px":[165,243],"m":"hang"},"sweetpea_c2":{"f":"sweetpea_c2.webp","p":"flowerpack","w":82.5,"h":121.5,"ax":0.4848,"ay":-0.0617,"px":[165,243],"m":"hang"},"gomphrena_c0":{"f":"gomphrena_c0.webp","p":"flowerpack","w":71.0,"h":108.5,"ax":0.5,"ay":-0.0507,"px":[142,217],"m":"hang"},"gomphrena_c1":{"f":"gomphrena_c1.webp","p":"flowerpack","w":71.0,"h":108.5,"ax":0.4859,"ay":-0.0507,"px":[142,217],"m":"hang"},"gomphrena_c2":{"f":"gomphrena_c2.webp","p":"flowerpack","w":71.0,"h":108.5,"ax":0.5,"ay":-0.0507,"px":[142,217],"m":"hang"},"gomphrena_c3":{"f":"gomphrena_c3.webp","p":"flowerpack","w":71.0,"h":108.5,"ax":0.5,"ay":-0.0507,"px":[142,217],"m":"hang"},"lilyofthevalley_c0_v0":{"f":"lilyofthevalley_c0_v0.webp","p":"flowerpack","w":69.0,"h":140.0,"ax":0.3261,"ay":-0.0679,"px":[138,280],"m":"hang"},"lilyofthevalley_c0_v1":{"f":"lilyofthevalley_c0_v1.webp","p":"flowerpack","w":68.5,"h":142.0,"ax":0.3431,"ay":-0.0528,"px":[137,284],"m":"hang"},"rose_c0":{"f":"rose_c0.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4957,"ay":0.5,"px":[117,112],"m":"head"},"rose_c1":{"f":"rose_c1.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4786,"ay":0.5,"px":[117,112],"m":"head"},"rose_c2":{"f":"rose_c2.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4786,"ay":0.5,"px":[117,112],"m":"head"},"rose_c3":{"f":"rose_c3.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4957,"ay":0.5,"px":[117,112],"m":"head"},"rose_c4":{"f":"rose_c4.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4786,"ay":0.5,"px":[117,112],"m":"head"},"rose_c5":{"f":"rose_c5.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4786,"ay":0.5,"px":[117,112],"m":"head"},"rose_c6":{"f":"rose_c6.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4957,"ay":0.5,"px":[117,112],"m":"head"},"rose_c7":{"f":"rose_c7.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4957,"ay":0.5,"px":[117,112],"m":"head"},"rose_c8":{"f":"rose_c8.webp","p":"flowerpack","w":58.5,"h":56.0,"ax":0.4786,"ay":0.5,"px":[117,112],"m":"head"},"sunflower_c0_v0":{"f":"sunflower_c0_v0.webp","p":"flowerpack","w":90.5,"h":87.5,"ax":0.4862,"ay":0.52,"px":[181,175],"m":"head"},"sunflower_c0_v1":{"f":"sunflower_c0_v1.webp","p":"flowerpack","w":84.5,"h":76.0,"ax":0.5148,"ay":0.5,"px":[169,152],"m":"head"},"sunflower_c0_v2":{"f":"sunflower_c0_v2.webp","p":"flowerpack","w":60.5,"h":55.0,"ax":0.5124,"ay":0.5091,"px":[121,110],"m":"head"},"carnation_c0":{"f":"carnation_c0.webp","p":"flowerpack","w":61.0,"h":57.0,"ax":0.4836,"ay":0.5,"px":[122,114],"m":"head"},"carnation_c1":{"f":"carnation_c1.webp","p":"flowerpack","w":61.0,"h":57.0,"ax":0.5,"ay":0.5,"px":[122,114],"m":"head"},"carnation_c2":{"f":"carnation_c2.webp","p":"flowerpack","w":61.0,"h":57.0,"ax":0.5,"ay":0.5,"px":[122,114],"m":"head"},"carnation_c3":{"f":"carnation_c3.webp","p":"flowerpack","w":61.0,"h":57.0,"ax":0.4836,"ay":0.5,"px":[122,114],"m":"head"},"carnation_c4":{"f":"carnation_c4.webp","p":"flowerpack","w":61.0,"h":57.0,"ax":0.4836,"ay":0.5,"px":[122,114],"m":"head"},"tulip_c0":{"f":"tulip_c0.webp","p":"flowerpack","w":59.0,"h":67.5,"ax":0.5,"ay":0.4815,"px":[118,135],"m":"head"},"tulip_c1":{"f":"tulip_c1.webp","p":"flowerpack","w":59.0,"h":67.5,"ax":0.4831,"ay":0.4815,"px":[118,135],"m":"head"},"tulip_c2":{"f":"tulip_c2.webp","p":"flowerpack","w":59.0,"h":67.5,"ax":0.4831,"ay":0.4815,"px":[118,135],"m":"head"},"tulip_c3":{"f":"tulip_c3.webp","p":"flowerpack","w":59.0,"h":67.5,"ax":0.5,"ay":0.4815,"px":[118,135],"m":"head"},"gerbera_c0":{"f":"gerbera_c0.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.5,"ay":0.5,"px":[140,130],"m":"head"},"gerbera_c1":{"f":"gerbera_c1.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.5,"ay":0.5,"px":[140,130],"m":"head"},"gerbera_c2":{"f":"gerbera_c2.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.4857,"ay":0.5,"px":[140,130],"m":"head"},"gerbera_c3":{"f":"gerbera_c3.webp","p":"flowerpack","w":70.0,"h":66.0,"ax":0.4857,"ay":0.5,"px":[140,132],"m":"head"},"gerbera_c4":{"f":"gerbera_c4.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.5,"ay":0.5,"px":[140,130],"m":"head"},"gerbera_c5":{"f":"gerbera_c5.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.4857,"ay":0.5,"px":[140,130],"m":"head"},"gerbera_c6":{"f":"gerbera_c6.webp","p":"flowerpack","w":70.0,"h":65.0,"ax":0.4857,"ay":0.5,"px":[140,130],"m":"head"},"lisianthus_c0":{"f":"lisianthus_c0.webp","p":"flowerpack","w":102.5,"h":83.0,"ax":0.4585,"ay":0.4157,"px":[205,166],"m":"head"},"lisianthus_c1":{"f":"lisianthus_c1.webp","p":"flowerpack","w":102.5,"h":83.0,"ax":0.4585,"ay":0.4157,"px":[205,166],"m":"head"},"lisianthus_c2":{"f":"lisianthus_c2.webp","p":"flowerpack","w":102.5,"h":83.0,"ax":0.4488,"ay":0.4157,"px":[205,166],"m":"head"},"lisianthus_c3":{"f":"lisianthus_c3.webp","p":"flowerpack","w":102.5,"h":83.0,"ax":0.4488,"ay":0.4157,"px":[205,166],"m":"head"},"pompon_c0":{"f":"pompon_c0.webp","p":"flowerpack","w":69.0,"h":59.0,"ax":0.5,"ay":0.5,"px":[138,118],"m":"head"},"pompon_c1":{"f":"pompon_c1.webp","p":"flowerpack","w":69.0,"h":59.0,"ax":0.4855,"ay":0.5,"px":[138,118],"m":"head"},"pompon_c2":{"f":"pompon_c2.webp","p":"flowerpack","w":69.0,"h":59.0,"ax":0.4855,"ay":0.5,"px":[138,118],"m":"head"},"pompon_c3":{"f":"pompon_c3.webp","p":"flowerpack","w":69.0,"h":59.0,"ax":0.5,"ay":0.5,"px":[138,118],"m":"head"},"ranunculus_c0":{"f":"ranunculus_c0.webp","p":"flowerpack","w":61.0,"h":57.5,"ax":0.5,"ay":0.513,"px":[122,115],"m":"head"},"ranunculus_c1":{"f":"ranunculus_c1.webp","p":"flowerpack","w":61.0,"h":57.5,"ax":0.4836,"ay":0.513,"px":[122,115],"m":"head"},"ranunculus_c2":{"f":"ranunculus_c2.webp","p":"flowerpack","w":61.0,"h":57.5,"ax":0.4836,"ay":0.513,"px":[122,115],"m":"head"},"ranunculus_c3":{"f":"ranunculus_c3.webp","p":"flowerpack","w":61.0,"h":57.5,"ax":0.5,"ay":0.513,"px":[122,115],"m":"head"},"peonymum_c0":{"f":"peonymum_c0.webp","p":"flowerpack","w":101.0,"h":99.5,"ax":0.495,"ay":0.4975,"px":[202,199],"m":"head"},"peonymum_c1":{"f":"peonymum_c1.webp","p":"flowerpack","w":101.0,"h":99.5,"ax":0.495,"ay":0.4975,"px":[202,199],"m":"head"},"peonymum_c2":{"f":"peonymum_c2.webp","p":"flowerpack","w":101.0,"h":99.5,"ax":0.505,"ay":0.4975,"px":[202,199],"m":"head"},"pincushion_c0":{"f":"pincushion_c0.webp","p":"flowerpack","w":105.0,"h":92.0,"ax":0.5,"ay":0.0,"px":[210,184],"m":"hang"},"peony_c0":{"f":"peony_c0.webp","p":"flowerpack","w":98.0,"h":86.0,"ax":0.4898,"ay":0.0,"px":[196,172],"m":"hang"},"peony_c1":{"f":"peony_c1.webp","p":"flowerpack","w":98.0,"h":86.0,"ax":0.4898,"ay":0.0,"px":[196,172],"m":"hang"},"peony_c2":{"f":"peony_c2.webp","p":"flowerpack","w":98.0,"h":86.0,"ax":0.5,"ay":0.0,"px":[196,172],"m":"hang"},"peony_c3":{"f":"peony_c3.webp","p":"flowerpack","w":98.0,"h":86.0,"ax":0.5,"ay":0.0,"px":[196,172],"m":"hang"},"dahlia_c0":{"f":"dahlia_c0.webp","p":"flowerpack","w":79.5,"h":75.5,"ax":0.4906,"ay":0.0,"px":[159,151],"m":"hang"},"dahlia_c1":{"f":"dahlia_c1.webp","p":"flowerpack","w":79.5,"h":75.5,"ax":0.5031,"ay":0.0,"px":[159,151],"m":"hang"},"dahlia_c2":{"f":"dahlia_c2.webp","p":"flowerpack","w":79.5,"h":75.5,"ax":0.5031,"ay":0.0,"px":[159,151],"m":"hang"},"dahlia_c3":{"f":"dahlia_c3.webp","p":"flowerpack","w":79.5,"h":75.5,"ax":0.4906,"ay":0.0,"px":[159,151],"m":"hang"},"dahlia_c4":{"f":"dahlia_c4.webp","p":"flowerpack","w":79.5,"h":75.5,"ax":0.5031,"ay":0.0,"px":[159,151],"m":"hang"},"lily_c0_v0":{"f":"lily_c0_v0.webp","p":"flowerpack","w":122.0,"h":107.5,"ax":0.5,"ay":-0.0047,"px":[244,215],"m":"hang"},"lily_c1_v0":{"f":"lily_c1_v0.webp","p":"flowerpack","w":122.0,"h":107.5,"ax":0.4918,"ay":-0.0047,"px":[244,215],"m":"hang"},"lily_c2_v0":{"f":"lily_c2_v0.webp","p":"flowerpack","w":122.0,"h":107.5,"ax":0.5,"ay":-0.0047,"px":[244,215],"m":"hang"},"lily_c3_v0":{"f":"lily_c3_v0.webp","p":"flowerpack","w":122.0,"h":107.5,"ax":0.5,"ay":-0.0047,"px":[244,215],"m":"hang"},"lily_c4_v0":{"f":"lily_c4_v0.webp","p":"flowerpack","w":122.0,"h":107.5,"ax":0.4918,"ay":-0.0047,"px":[244,215],"m":"hang"},"lily_c0_v1":{"f":"lily_c0_v1.webp","p":"flowerpack","w":98.0,"h":100.0,"ax":0.5357,"ay":0.01,"px":[196,200],"m":"hang"},"lily_c1_v1":{"f":"lily_c1_v1.webp","p":"flowerpack","w":98.0,"h":100.0,"ax":0.5357,"ay":0.01,"px":[196,200],"m":"hang"},"lily_c2_v1":{"f":"lily_c2_v1.webp","p":"flowerpack","w":98.0,"h":100.0,"ax":0.5255,"ay":0.01,"px":[196,200],"m":"hang"},"lily_c3_v1":{"f":"lily_c3_v1.webp","p":"flowerpack","w":98.0,"h":100.0,"ax":0.5357,"ay":0.01,"px":[196,200],"m":"hang"},"lily_c4_v1":{"f":"lily_c4_v1.webp","p":"flowerpack","w":98.0,"h":100.0,"ax":0.5357,"ay":0.01,"px":[196,200],"m":"hang"},"kingprotea_c0_v0":{"f":"kingprotea_c0_v0.webp","p":"flowerpack","w":119.0,"h":114.0,"ax":0.4916,"ay":0.0,"px":[238,228],"m":"hang"},"kingprotea_c1_v0":{"f":"kingprotea_c1_v0.webp","p":"flowerpack","w":118.5,"h":113.0,"ax":0.4979,"ay":-0.0044,"px":[237,226],"m":"hang"},"kingprotea_c0_v1":{"f":"kingprotea_c0_v1.webp","p":"flowerpack","w":93.5,"h":114.5,"ax":0.5455,"ay":0.0,"px":[187,229],"m":"hang"},"kingprotea_c1_v1":{"f":"kingprotea_c1_v1.webp","p":"flowerpack","w":91.5,"h":113.5,"ax":0.5246,"ay":-0.0044,"px":[183,227],"m":"hang"},"thistle_c0":{"f":"thistle_c0.webp","p":"flowerpack","w":45.0,"h":62.0,"ax":0.5,"ay":0.0,"px":[90,124],"m":"hang"},"thistle_c1":{"f":"thistle_c1.webp","p":"flowerpack","w":45.0,"h":62.0,"ax":0.5,"ay":0.0,"px":[90,124],"m":"hang"},"cotton_c0":{"f":"cotton_c0.webp","p":"flowerpack","w":107.5,"h":125.0,"ax":0.507,"ay":-0.012,"px":[215,250],"m":"hang"},"butterflyranunculus_c0":{"f":"butterflyranunculus_c0.webp","p":"flowerpack","w":112.0,"h":116.0,"ax":0.4911,"ay":-0.0302,"px":[224,232],"m":"hang"},"butterflyranunculus_c1":{"f":"butterflyranunculus_c1.webp","p":"flowerpack","w":112.0,"h":116.0,"ax":0.4911,"ay":-0.0302,"px":[224,232],"m":"hang"},"butterflyranunculus_c2":{"f":"butterflyranunculus_c2.webp","p":"flowerpack","w":112.0,"h":116.0,"ax":0.4821,"ay":-0.0302,"px":[224,232],"m":"hang"},"silverdollareucalyptus__preview":{"f":"silverdollareucalyptus__preview.webp","p":"flowerpack","w":86.53,"h":320.5,"ax":0.468,"ay":0.9969,"px":[54,200],"m":"preview"},"gypsophila_c0":{"f":"gypsophila_c0.webp","p":"flowerpack","w":71.5,"h":122.0,"ax":0.5385,"ay":-0.0123,"px":[143,244],"m":"hang"},"oncidium_c0":{"f":"oncidium_c0.webp","p":"flowerpack","w":75.5,"h":145.5,"ax":0.3841,"ay":-0.0172,"px":[151,291],"m":"hang"},"buttonmum_c0":{"f":"buttonmum_c0.webp","p":"flowerpack","w":67.0,"h":60.5,"ax":0.4701,"ay":-0.1983,"px":[134,121],"m":"hang"},"buttonmum_c1":{"f":"buttonmum_c1.webp","p":"flowerpack","w":67.0,"h":60.5,"ax":0.4701,"ay":-0.1983,"px":[134,121],"m":"hang"},"buttonmum_c2":{"f":"buttonmum_c2.webp","p":"flowerpack","w":67.0,"h":60.5,"ax":0.4552,"ay":-0.1983,"px":[134,121],"m":"hang"},"dianthus_c0":{"f":"dianthus_c0.webp","p":"flowerpack","w":100.0,"h":112.0,"ax":0.5,"ay":0.0,"px":[200,224],"m":"hang"},"dianthus_c1":{"f":"dianthus_c1.webp","p":"flowerpack","w":100.0,"h":112.0,"ax":0.5,"ay":0.0,"px":[200,224],"m":"hang"},"delphinium_c0":{"f":"delphinium_c0.webp","p":"flowerpack","w":56.73,"h":168.5,"ax":0.4671,"ay":-0.0089,"px":[101,300],"m":"hang"},"fountaingrass_c0_v0":{"f":"fountaingrass_c0_v0.webp","p":"flowerpack","w":55.18,"h":178.0,"ax":0.3987,"ay":-0.0084,"px":[93,300],"m":"hang"},"fountaingrass_c1_v0":{"f":"fountaingrass_c1_v0.webp","p":"flowerpack","w":55.18,"h":178.0,"ax":0.3987,"ay":-0.0084,"px":[93,300],"m":"hang"},"fountaingrass_c0_v1":{"f":"fountaingrass_c0_v1.webp","p":"flowerpack","w":174.0,"h":172.26,"ax":0.0201,"ay":-0.0174,"px":[300,297],"m":"hang"},"fountaingrass_c1_v1":{"f":"fountaingrass_c1_v1.webp","p":"flowerpack","w":174.0,"h":172.26,"ax":0.0259,"ay":-0.0174,"px":[300,297],"m":"hang"},"birdnestfern_c0":{"f":"birdnestfern_c0.webp","p":"flowerpack","w":47.81,"h":163.0,"ax":0.4915,"ay":0.0,"px":[88,300],"m":"whole"},"fishtailfern_c0_v0":{"f":"fishtailfern_c0_v0.webp","p":"flowerpack","w":65.0,"h":149.0,"ax":0.4923,"ay":0.0,"px":[130,298],"m":"whole"},"fishtailfern_c0_v1":{"f":"fishtailfern_c0_v1.webp","p":"flowerpack","w":66.52,"h":153.5,"ax":0.6089,"ay":0.0293,"px":[130,300],"m":"whole"},"fishtailfern_c0_v2":{"f":"fishtailfern_c0_v2.webp","p":"flowerpack","w":64.0,"h":149.5,"ax":0.4531,"ay":0.0033,"px":[128,299],"m":"whole"},"fishtailfern_c0_v3":{"f":"fishtailfern_c0_v3.webp","p":"flowerpack","w":60.4,"h":151.0,"ax":0.4884,"ay":0.0132,"px":[120,300],"m":"whole"},"fishtailfern_c0_v4":{"f":"fishtailfern_c0_v4.webp","p":"flowerpack","w":83.0,"h":150.0,"ax":0.253,"ay":0.0067,"px":[166,300],"m":"whole"},"fishtailfern_c0_v5":{"f":"fishtailfern_c0_v5.webp","p":"flowerpack","w":81.5,"h":146.5,"ax":0.7117,"ay":-0.0171,"px":[163,293],"m":"whole"},"fiddlephilodendron_c0":{"f":"fiddlephilodendron_c0.webp","p":"flowerpack","w":90.0,"h":145.0,"ax":0.4833,"ay":0.0,"px":[180,290],"m":"whole"},"irisleaf_c0_v0":{"f":"irisleaf_c0_v0.webp","p":"flowerpack","w":35.93,"h":196.0,"ax":0.487,"ay":-0.0026,"px":[55,300],"m":"whole"},"irisleaf_c0_v1":{"f":"irisleaf_c0_v1.webp","p":"flowerpack","w":41.81,"h":196.0,"ax":0.8371,"ay":-0.0026,"px":[64,300],"m":"whole"},"asparagusfern_c0":{"f":"asparagusfern_c0.webp","p":"flowerpack","w":72.5,"h":150.0,"ax":0.5103,"ay":0.0,"px":[145,300],"m":"whole"},"dustymiller_c0":{"f":"dustymiller_c0.webp","p":"flowerpack","w":91.5,"h":139.5,"ax":0.4754,"ay":-0.0466,"px":[183,279],"m":"whole"},"birch__preview":{"f":"birch__preview.webp","p":"flowerpack","w":90.72,"h":288.0,"ax":0.4575,"ay":1.0,"px":[63,200],"m":"preview"},"angelphilodendron_c0":{"f":"angelphilodendron_c0.webp","p":"flowerpack","w":112.5,"h":134.5,"ax":0.4889,"ay":0.0,"px":[225,269],"m":"whole"},"silveroak_c0_v0":{"f":"silveroak_c0_v0.webp","p":"flowerpack","w":73.67,"h":170.0,"ax":0.5158,"ay":0.0118,"px":[130,300],"m":"whole"},"silveroak_c0_v1":{"f":"silveroak_c0_v1.webp","p":"flowerpack","w":57.12,"h":168.0,"ax":0.5427,"ay":0.0,"px":[102,300],"m":"whole"},"silveroak_c0_v2":{"f":"silveroak_c0_v2.webp","p":"flowerpack","w":84.28,"h":172.0,"ax":0.5221,"ay":0.0233,"px":[147,300],"m":"whole"},"silveroak_c0_v3":{"f":"silveroak_c0_v3.webp","p":"flowerpack","w":66.08,"h":168.0,"ax":0.5145,"ay":0.0,"px":[118,300],"m":"whole"},"fatsia_c0":{"f":"fatsia_c0.webp","p":"flowerpack","w":143.0,"h":120.5,"ax":0.4685,"ay":-0.0207,"px":[286,241],"m":"whole"},"fern_c0":{"f":"fern_c0.webp","p":"flowerpack","w":83.94,"h":154.5,"ax":0.4467,"ay":-0.0194,"px":[163,300],"m":"hang"},"foxtail_c0":{"f":"foxtail_c0.webp","p":"flowerpack","w":29.0,"h":103.5,"ax":0.5172,"ay":-0.029,"px":[58,207],"m":"hang"},"chamomile_c0_v0":{"f":"chamomile_c0_v0.webp","p":"flowerpack","w":65.5,"h":74.0,"ax":0.4885,"ay":-0.0541,"px":[131,148],"m":"hang"},"chamomile_c0_v1":{"f":"chamomile_c0_v1.webp","p":"flowerpack","w":68.0,"h":78.5,"ax":0.5294,"ay":-0.0446,"px":[136,157],"m":"hang"},"chamomile_c0_v2":{"f":"chamomile_c0_v2.webp","p":"flowerpack","w":75.5,"h":78.0,"ax":0.4503,"ay":-0.0513,"px":[151,156],"m":"hang"},"chamomile_c0_v3":{"f":"chamomile_c0_v3.webp","p":"flowerpack","w":72.5,"h":78.5,"ax":0.4897,"ay":-0.0446,"px":[145,157],"m":"hang"},"bluestar_c0":{"f":"bluestar_c0.webp","p":"flowerpack","w":70.0,"h":78.0,"ax":0.4929,"ay":-0.0513,"px":[140,156],"m":"hang"},"lavender_c0":{"f":"lavender_c0.webp","p":"flowerpack","w":37.5,"h":138.0,"ax":0.48,"ay":-0.0072,"px":[75,276],"m":"hang"},"hydrangea_c0":{"f":"hydrangea_c0.webp","p":"flowerpack","w":111.0,"h":100.0,"ax":0.5045,"ay":0.0,"px":[222,200],"m":"hang"},"hydrangea_c1":{"f":"hydrangea_c1.webp","p":"flowerpack","w":111.0,"h":100.0,"ax":0.5045,"ay":0.0,"px":[222,200],"m":"hang"},"hydrangea_c2":{"f":"hydrangea_c2.webp","p":"flowerpack","w":111.0,"h":100.0,"ax":0.4955,"ay":0.0,"px":[222,200],"m":"hang"},"hydrangea_c3":{"f":"hydrangea_c3.webp","p":"flowerpack","w":111.0,"h":100.0,"ax":0.5045,"ay":0.0,"px":[222,200],"m":"hang"},"anthurium_c0":{"f":"anthurium_c0.webp","p":"flowerpack","w":79.0,"h":93.0,"ax":0.5,"ay":-0.0054,"px":[158,186],"m":"hang"},"anthurium_c1":{"f":"anthurium_c1.webp","p":"flowerpack","w":79.0,"h":93.0,"ax":0.4873,"ay":-0.0054,"px":[158,186],"m":"hang"},"anthurium_c2":{"f":"anthurium_c2.webp","p":"flowerpack","w":79.0,"h":93.0,"ax":0.5,"ay":-0.0054,"px":[158,186],"m":"hang"},"pointedeucalyptus__preview":{"f":"pointedeucalyptus__preview.webp","p":"flowerpack","w":54.29,"h":329.0,"ax":0.3961,"ay":0.997,"px":[33,200],"m":"preview"},"monstera_c0":{"f":"monstera_c0.webp","p":"flowerpack","w":125.0,"h":125.5,"ax":0.528,"ay":-0.1275,"px":[250,251],"m":"hang"},"cedar__preview":{"f":"cedar__preview.webp","p":"flowerpack","w":81.09,"h":318.0,"ax":0.3083,"ay":0.9969,"px":[51,200],"m":"preview"},"eucalyptus__preview":{"f":"eucalyptus__preview.webp","p":"flowerpack","w":35.82,"h":298.5,"ax":0.3769,"ay":0.9966,"px":[24,200],"m":"preview"},"birdofparadise_c0":{"f":"birdofparadise_c0.webp","p":"flowerpack","w":131.66,"h":174.0,"ax":0.3798,"ay":0.0,"px":[227,300],"m":"hang"},"celosia_c0":{"f":"celosia_c0.webp","p":"flowerpack","w":95.5,"h":78.0,"ax":0.4869,"ay":0.0,"px":[191,156],"m":"hang"},"waxflower_c0_v0":{"f":"waxflower_c0_v0.webp","p":"flowerpack","w":73.5,"h":142.0,"ax":0.5374,"ay":0.0,"px":[147,284],"m":"hang"},"waxflower_c0_v1":{"f":"waxflower_c0_v1.webp","p":"flowerpack","w":111.5,"h":139.0,"ax":0.6099,"ay":-0.0216,"px":[223,278],"m":"hang"},"astilbe_c0_v0":{"f":"astilbe_c0_v0.webp","p":"flowerpack","w":76.0,"h":145.0,"ax":0.4276,"ay":0.0,"px":[152,290],"m":"hang"},"astilbe_c0_v1":{"f":"astilbe_c0_v1.webp","p":"flowerpack","w":104.5,"h":147.5,"ax":0.3301,"ay":0.0169,"px":[209,295],"m":"hang"},"greendianthus_c0":{"f":"greendianthus_c0.webp","p":"flowerpack","w":70.0,"h":72.0,"ax":0.4929,"ay":0.0,"px":[140,144],"m":"hang"},"greendianthus_c1":{"f":"greendianthus_c1.webp","p":"flowerpack","w":65.0,"h":72.0,"ax":0.4923,"ay":0.0,"px":[130,144],"m":"hang"},"stock_c0":{"f":"stock_c0.webp","p":"flowerpack","w":63.0,"h":140.0,"ax":0.5079,"ay":0.0,"px":[126,280],"m":"hang"},"statice_c0":{"f":"statice_c0.webp","p":"flowerpack","w":80.5,"h":115.0,"ax":0.5217,"ay":0.0,"px":[161,230],"m":"hang"},"statice_c1":{"f":"statice_c1.webp","p":"flowerpack","w":80.5,"h":115.0,"ax":0.5093,"ay":0.0,"px":[161,230],"m":"hang"},"statice_c2":{"f":"statice_c2.webp","p":"flowerpack","w":80.5,"h":115.0,"ax":0.5217,"ay":0.0,"px":[161,230],"m":"hang"},"scabiosa_c0":{"f":"scabiosa_c0.webp","p":"flowerpack","w":70.5,"h":70.0,"ax":0.4965,"ay":0.0,"px":[141,140],"m":"hang"},"scabiosa_c1":{"f":"scabiosa_c1.webp","p":"flowerpack","w":70.5,"h":70.0,"ax":0.4823,"ay":0.0,"px":[141,140],"m":"hang"},"scabiosa_c2":{"f":"scabiosa_c2.webp","p":"flowerpack","w":70.5,"h":70.0,"ax":0.4965,"ay":0.0,"px":[141,140],"m":"hang"},"scabiosa_c3":{"f":"scabiosa_c3.webp","p":"flowerpack","w":70.5,"h":70.0,"ax":0.4965,"ay":0.0,"px":[141,140],"m":"hang"},"piece_silver-dollar-single":{"f":"piece_silver-dollar-single.webp","p":"flowerpack","w":288.23,"h":396.5,"ax":0.9645,"ay":0.9243,"px":[189,260],"m":"piece"},"piece_silver-dollar":{"f":"piece_silver-dollar.webp","p":"flowerpack","w":559.0,"h":419.25,"ax":0.4991,"ay":0.9302,"px":[260,195],"m":"piece"},"piece_silver-dollar-tip":{"f":"piece_silver-dollar-tip.webp","p":"flowerpack","w":433.23,"h":440.0,"ax":0.4778,"ay":0.9295,"px":[256,260],"m":"piece"},"piece_pointed":{"f":"piece_pointed.webp","p":"flowerpack","w":409.0,"h":397.99,"ax":0.5208,"ay":0.985,"px":[260,253],"m":"piece"},"piece_pointed-tip":{"f":"piece_pointed-tip.webp","p":"flowerpack","w":246.3,"h":410.5,"ax":0.5278,"ay":0.9866,"px":[156,260],"m":"piece"},"piece_eucalyptus":{"f":"piece_eucalyptus.webp","p":"flowerpack","w":310.5,"h":156.44,"ax":0.4799,"ay":0.5241,"px":[260,131],"m":"piece"},"piece_eucalyptus-tip":{"f":"piece_eucalyptus-tip.webp","p":"flowerpack","w":293.0,"h":250.18,"ax":0.4642,"ay":0.9973,"px":[260,222],"m":"piece"},"piece_cedar":{"f":"piece_cedar.webp","p":"flowerpack","w":278.64,"h":294.5,"ax":0.3445,"ay":0.9949,"px":[246,260],"m":"piece"},"piece_cedar-tip":{"f":"piece_cedar-tip.webp","p":"flowerpack","w":179.79,"h":294.0,"ax":0.5506,"ay":1.017,"px":[159,260],"m":"piece"},"vase_urnlow_ivory":{"f":"vase_urnlow_ivory.webp","p":"flowerpack","w":119.14,"h":176.5,"ax":-2.2789,"ay":-2.6856,"px":[135,200],"m":"thumb","vb":"245 456 170 214"},"vase_urnhigh_ivory":{"f":"vase_urnhigh_ivory.webp","p":"flowerpack","w":119.46,"h":251.5,"ax":-2.2727,"ay":-1.7256,"px":[95,200],"m":"thumb","vb":"240 414 180 285"},"vase_classic_ivory":{"f":"vase_classic_ivory.webp","p":"flowerpack","w":132.82,"h":172.5,"ax":-1.9838,"ay":-2.771,"px":[154,200],"m":"thumb","vb":"230 459 200 210"},"vase_petite_ivory":{"f":"vase_petite_ivory.webp","p":"flowerpack","w":133.06,"h":169.5,"ax":-1.9803,"ay":-2.8378,"px":[157,200],"m":"thumb","vb":"230 460.5 200 210"},"vase_slim_ivory":{"f":"vase_slim_ivory.webp","p":"flowerpack","w":96.77,"h":122.5,"ax":-2.9088,"ay":-3.902,"px":[158,200],"m":"thumb","vb":"230 434 200 210"},"vase_bud_ivory":{"f":"vase_bud_ivory.webp","p":"flowerpack","w":96.8,"h":119.5,"ax":-2.9185,"ay":-4.0251,"px":[162,200],"m":"thumb","vb":"230 435.5 200 210"},"vase_columnlow_ivory":{"f":"vase_columnlow_ivory.webp","p":"flowerpack","w":58.65,"h":172.5,"ax":-5.1407,"ay":-2.771,"px":[68,200],"m":"thumb","vb":"230 439 200 250"},"vase_columnhigh_ivory":{"f":"vase_columnhigh_ivory.webp","p":"flowerpack","w":93.42,"h":252.5,"ax":-3.0292,"ay":-1.7743,"px":[74,200],"m":"thumb","vb":"230 434 200 280"},"vase_paper_ivory":{"f":"vase_paper_ivory.webp","p":"flowerpack","w":294.43,"h":530.5,"ax":-0.6215,"ay":-0.3139,"px":[111,200],"m":"thumb","vb":"130 140 400 600"},"vase_mug_ivory":{"f":"vase_mug_ivory.webp","p":"flowerpack","w":141.0,"h":124.78,"ax":-1.9965,"ay":-3.8146,"px":[200,177],"m":"thumb","vb":"240 450 210 180"},"vase_bowl_ivory":{"f":"vase_bowl_ivory.webp","p":"flowerpack","w":161.0,"h":95.8,"ax":-1.5559,"ay":-4.9272,"px":[200,119],"m":"thumb","vb":"230 428 200 175"},"vase_canvaswrap_ivory":{"f":"vase_canvaswrap_ivory.webp","p":"flowerpack","w":338.31,"h":537.0,"ax":-0.4759,"ay":-0.3007,"px":[126,200],"m":"thumb","vb":"130 140 400 600"},"vase_naked_ivory":{"f":"vase_naked_ivory.webp","p":"flowerpack","w":190.55,"h":225.5,"ax":-1.2385,"ay":-1.9224,"px":[169,200],"m":"thumb","vb":"230 400 200 290"},"vase_television_ivory":{"f":"vase_television_ivory.webp","p":"flowerpack","w":291.29,"h":391.0,"ax":-0.5905,"ay":-0.6266,"px":[149,200],"m":"thumb","vb":"133 225 370 430"},"vase_poodle_ivory":{"f":"vase_poodle_ivory.webp","p":"flowerpack","w":139.12,"h":262.5,"ax":-1.876,"ay":-1.4362,"px":[106,200],"m":"thumb","vb":"235 370 190 285"},"vase_typewriter_ivory":{"f":"vase_typewriter_ivory.webp","p":"flowerpack","w":263.0,"h":180.16,"ax":-0.7586,"ay":-2.5811,"px":[200,137],"m":"thumb","vb":"185 420 290 245"},"vase_urnlow_gray":{"f":"vase_urnlow_gray.webp","p":"flowerpack","w":119.14,"h":176.5,"ax":-2.2705,"ay":-2.6856,"px":[135,200],"m":"thumb","vb":"245 456 170 214"},"vase_urnhigh_gray":{"f":"vase_urnhigh_gray.webp","p":"flowerpack","w":119.46,"h":251.5,"ax":-2.2643,"ay":-1.7256,"px":[95,200],"m":"thumb","vb":"240 414 180 285"},"vase_classic_gray":{"f":"vase_classic_gray.webp","p":"flowerpack","w":132.82,"h":172.5,"ax":-1.9838,"ay":-2.771,"px":[154,200],"m":"thumb","vb":"230 459 200 210"},"vase_petite_gray":{"f":"vase_petite_gray.webp","p":"flowerpack","w":133.06,"h":169.5,"ax":-1.9879,"ay":-2.8378,"px":[157,200],"m":"thumb","vb":"230 460.5 200 210"},"vase_slim_gray":{"f":"vase_slim_gray.webp","p":"flowerpack","w":96.77,"h":122.5,"ax":-2.9191,"ay":-3.902,"px":[158,200],"m":"thumb","vb":"230 434 200 210"},"vase_bud_gray":{"f":"vase_bud_gray.webp","p":"flowerpack","w":96.8,"h":119.5,"ax":-2.9082,"ay":-4.0251,"px":[162,200],"m":"thumb","vb":"230 435.5 200 210"},"vase_columnlow_gray":{"f":"vase_columnlow_gray.webp","p":"flowerpack","w":58.65,"h":172.5,"ax":-5.1236,"ay":-2.771,"px":[68,200],"m":"thumb","vb":"230 439 200 250"},"vase_columnhigh_gray":{"f":"vase_columnhigh_gray.webp","p":"flowerpack","w":93.42,"h":252.5,"ax":-3.0292,"ay":-1.7743,"px":[74,200],"m":"thumb","vb":"230 434 200 280"},"vase_paper_gray":{"f":"vase_paper_gray.webp","p":"flowerpack","w":294.43,"h":530.5,"ax":-0.6249,"ay":-0.3139,"px":[111,200],"m":"thumb","vb":"130 140 400 600"},"vase_mug_gray":{"f":"vase_mug_gray.webp","p":"flowerpack","w":141.0,"h":124.78,"ax":-2.0035,"ay":-3.8146,"px":[200,177],"m":"thumb","vb":"240 450 210 180"},"vase_bowl_gray":{"f":"vase_bowl_gray.webp","p":"flowerpack","w":161.0,"h":95.8,"ax":-1.5497,"ay":-4.9272,"px":[200,119],"m":"thumb","vb":"230 428 200 175"},"vase_canvaswrap_gray":{"f":"vase_canvaswrap_gray.webp","p":"flowerpack","w":338.31,"h":537.0,"ax":-0.4729,"ay":-0.3007,"px":[126,200],"m":"thumb","vb":"130 140 400 600"},"vase_naked_gray":{"f":"vase_naked_gray.webp","p":"flowerpack","w":190.55,"h":225.5,"ax":-1.2385,"ay":-1.9224,"px":[169,200],"m":"thumb","vb":"230 400 200 290"},"vase_television_gray":{"f":"vase_television_gray.webp","p":"flowerpack","w":291.29,"h":391.0,"ax":-0.5939,"ay":-0.6266,"px":[149,200],"m":"thumb","vb":"133 225 370 430"},"vase_poodle_gray":{"f":"vase_poodle_gray.webp","p":"flowerpack","w":139.12,"h":262.5,"ax":-1.876,"ay":-1.4362,"px":[106,200],"m":"thumb","vb":"235 370 190 285"},"vase_typewriter_gray":{"f":"vase_typewriter_gray.webp","p":"flowerpack","w":263.0,"h":180.16,"ax":-0.7548,"ay":-2.5811,"px":[200,137],"m":"thumb","vb":"185 420 290 245"},"vase_urnlow_black":{"f":"vase_urnlow_black.webp","p":"flowerpack","w":119.14,"h":176.5,"ax":-2.2705,"ay":-2.6856,"px":[135,200],"m":"thumb","vb":"245 456 170 214"},"vase_urnhigh_black":{"f":"vase_urnhigh_black.webp","p":"flowerpack","w":119.46,"h":251.5,"ax":-2.2727,"ay":-1.7256,"px":[95,200],"m":"thumb","vb":"240 414 180 285"},"vase_classic_black":{"f":"vase_classic_black.webp","p":"flowerpack","w":132.82,"h":172.5,"ax":-1.9913,"ay":-2.771,"px":[154,200],"m":"thumb","vb":"230 459 200 210"},"vase_petite_black":{"f":"vase_petite_black.webp","p":"flowerpack","w":133.06,"h":169.5,"ax":-1.9803,"ay":-2.8378,"px":[157,200],"m":"thumb","vb":"230 460.5 200 210"},"vase_slim_black":{"f":"vase_slim_black.webp","p":"flowerpack","w":96.77,"h":122.5,"ax":-2.9088,"ay":-3.902,"px":[158,200],"m":"thumb","vb":"230 434 200 210"},"vase_bud_black":{"f":"vase_bud_black.webp","p":"flowerpack","w":96.8,"h":119.5,"ax":-2.9082,"ay":-4.0251,"px":[162,200],"m":"thumb","vb":"230 435.5 200 210"},"vase_columnlow_black":{"f":"vase_columnlow_black.webp","p":"flowerpack","w":58.65,"h":172.5,"ax":-5.1407,"ay":-2.771,"px":[68,200],"m":"thumb","vb":"230 439 200 250"},"vase_columnhigh_black":{"f":"vase_columnhigh_black.webp","p":"flowerpack","w":93.42,"h":252.5,"ax":-3.0399,"ay":-1.7743,"px":[74,200],"m":"thumb","vb":"230 434 200 280"},"vase_paper_black":{"f":"vase_paper_black.webp","p":"flowerpack","w":294.43,"h":530.5,"ax":-0.6215,"ay":-0.3139,"px":[111,200],"m":"thumb","vb":"130 140 400 600"},"vase_mug_black":{"f":"vase_mug_black.webp","p":"flowerpack","w":141.0,"h":124.78,"ax":-1.9965,"ay":-3.8146,"px":[200,177],"m":"thumb","vb":"240 450 210 180"},"vase_bowl_black":{"f":"vase_bowl_black.webp","p":"flowerpack","w":161.0,"h":95.8,"ax":-1.5497,"ay":-4.9272,"px":[200,119],"m":"thumb","vb":"230 428 200 175"},"vase_canvaswrap_black":{"f":"vase_canvaswrap_black.webp","p":"flowerpack","w":338.31,"h":537.0,"ax":-0.4759,"ay":-0.3007,"px":[126,200],"m":"thumb","vb":"130 140 400 600"},"vase_naked_black":{"f":"vase_naked_black.webp","p":"flowerpack","w":190.55,"h":225.5,"ax":-1.2438,"ay":-1.9224,"px":[169,200],"m":"thumb","vb":"230 400 200 290"},"vase_television_black":{"f":"vase_television_black.webp","p":"flowerpack","w":291.29,"h":391.0,"ax":-0.5905,"ay":-0.6266,"px":[149,200],"m":"thumb","vb":"133 225 370 430"},"vase_poodle_black":{"f":"vase_poodle_black.webp","p":"flowerpack","w":139.12,"h":262.5,"ax":-1.8688,"ay":-1.4362,"px":[106,200],"m":"thumb","vb":"235 370 190 285"},"vase_typewriter_black":{"f":"vase_typewriter_black.webp","p":"flowerpack","w":263.0,"h":180.16,"ax":-0.7586,"ay":-2.5811,"px":[200,137],"m":"thumb","vb":"185 420 290 245"}};
+
+return module.exports;
+})({exports:{}});
+__modules['data'] = (function(module, exports){
+// 移植自网页版 app.js（由 tools 脚本提取，数据保持一致）
+const DATA = [{"id":"doublelisianthus","name":"洋桔梗","en":"Double lisianthus","size":33,"vectorHead":true,"colors":[["白紫邊","#7951b4"],["奶白","#fcfaf2"],["淡粉","#e5b8c8"],["紫色","#b5a0cc"],["淺綠","#cbd4ab"]]},{"id":"minirose","name":"迷你玫瑰","en":"Mini rose","size":29,"vectorHead":true,"stemWidth":1.5,"colors":[["柔粉","#e6b3b0"],["奶白","#fcfaf2"],["杏橘","#edb082"],["黃色","#e8c65b"],["經典紅","#c52e36"]]},{"id":"spidermum","name":"煙火菊","en":"Spider chrysanthemum","size":43,"vectorHead":true,"stemWidth":2.2,"colors":[["橘金","#b96b35"],["黃色","#e3cd83"]]},{"id":"feathergerbera","name":"羽毛太陽","en":"Spider gerbera","size":40,"vectorHead":true,"stemWidth":2.1,"colors":[["粉色","#e6b1c3"],["白色","#fcfaf3"],["黃色","#e7c965"],["橘色","#e79a56"],["紅色","#c94c53"]]},{"id":"poppy","name":"罌粟","en":"Poppy","size":35,"vectorHead":true,"stemWidth":1.7,"colors":[["紅色","#ce5149"],["橘色","#e49b62"],["黃色","#ebce72"],["白色","#fcfaf1"]]},{"id":"laceflower","name":"蕾絲花","en":"Lace flower","size":33,"artSize":[110,125],"colors":[["白色","#f5f3e8"]],"extra":true,"vectorSpray":true,"stemWidth":1.5},{"id":"sweetpea","name":"香碗豆","en":"Sweet pea","size":31,"artSize":[95,130],"colors":[["粉色","#e6b6ca"],["白色","#fffaf5"],["紫色","#a28cb9"]],"extra":true,"vectorSpray":true,"stemWidth":1.5},{"id":"gomphrena","name":"千日紅","en":"Globe amaranth","size":23.4,"artSize":[85.5,117],"colors":[["紅色","#b94d64"],["粉色","#dfa7c2"],["漸層橘紅","#dc8955"],["白色","#fbf7ec"]],"extra":true,"vectorSpray":true,"stemWidth":1.35},{"id":"lilyofthevalley","name":"鈴蘭","en":"Lily of the valley","size":30.8,"artSize":[93.5,148.5],"colors":[["白色","#fffdf5"]],"extra":true,"vectorSpray":true,"stemWidth":1.5},{"id":"rose","name":"玫瑰","en":"Rose","size":27,"colors":[["經典紅","#c52e36"],["柔粉","#e6b3b0"],["奶白","#fcfaf2"],["酒紅","#9d344c"],["杏橘","#edb082"],["黃色","#e8c65b"],["深藍色","#344b83"],["紫色","#9773b1"],["漸層紅色","#d86572"]]},{"id":"sunflower","name":"向日葵","en":"Sunflower","size":44,"newHead":true,"naturalColor":true,"neutralKey":true,"stemWidth":2.8,"colors":[["金黃","#e4b949"]]},{"id":"carnation","name":"康乃馨","en":"Carnation","size":28,"colors":[["淺粉","#f5dddc"],["白色","#fcfaf2"],["桃紅","#e5a6bf"],["珊瑚","#efbeb1"],["經典紅","#cf303b"]]},{"id":"tulip","name":"鬱金香","en":"Tulip","size":30.03,"colors":[["黃色","#e9cd71"],["奶白","#fcfaf2"],["粉色","#e2a9b3"],["紫色","#b6a0c2"]]},{"id":"gerbera","name":"非洲菊","en":"Gerbera","size":32.3,"colors":[["杏橘","#e3a27f"],["黃色","#e6c775"],["粉色","#d99aaa"],["白色","#fcfaf2"],["橘色","#ed913d"],["桃紅","#c64c91"],["紅色","#bf3047"]]},{"id":"lisianthus","name":"單瓣桔梗","en":"Single lisianthus","previewColor":2,"size":28,"colors":[["奶白","#fcfaf2"],["淡粉","#e5b8c8"],["紫色","#b5a0cc"],["淺綠","#cbd4ab"]]},{"id":"pompon","previewColor":1,"name":"乒乓菊","en":"Pompon mum","size":32,"colors":[["奶白","#fcfaf2"],["黃色","#e2cc78"],["淺綠","#c4d2a0"],["淡粉","#e4b8c2"]]},{"id":"ranunculus","name":"陸蓮","en":"Ranunculus","size":30,"newHead":true,"colors":[["柔粉","#ecc2c5"],["奶白","#fcfaf2"],["橘色","#eeb18b"],["酒紅","#a3445e"]]},{"id":"peonymum","name":"牡丹菊","en":"Peony mum","size":48.75,"newHead":true,"colors":[["粉紫","#d4b1cf"],["奶白","#fcfaf2"],["黃色","#e9d27c"]]},{"id":"pincushion","name":"針墊花","en":"Pincushion protea","size":39,"extra":true,"newAtlas":true,"keepAspect":true,"artSize":[92,92],"stemWidth":2.5,"colors":[["橘色","#d58b3d"]]},{"id":"peony","name":"芍藥","en":"Peony","size":39,"artSize":[88,86],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"recolorPetals":true,"stemWidth":2.4,"colors":[["柔粉","#edbccd"],["白色","#fffdfa"],["珊瑚","#e79a87"],["酒紅","#983d53"]]},{"id":"dahlia","name":"大理花","en":"Dahlia","size":34.2,"artSize":[75.6,75.6],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"recolorPetals":true,"stemWidth":2.4,"colors":[["杏橘","#e9b491"],["奶白","#f4efdf"],["柔粉","#e9adc6"],["黃色","#edcd70"],["酒紅","#873548"]]},{"id":"lily","name":"百合花","en":"Lily","size":48.3,"artSize":[117.3,108.1],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"recolorPetals":true,"stemWidth":2.4,"colors":[["白色","#fffdfa"],["柔粉","#e8abc5"],["黃色","#edcd73"],["橘色","#e99a59"],["紅色","#ba4b55"]]},{"id":"kingprotea","name":"帝王花","en":"King protea","size":49.98,"extra":true,"newAtlas":true,"keepAspect":true,"artSize":[112.2,114.24],"stemWidth":3,"colors":[["霧粉","#c18c98"],["白色紅邊","#f3efeb"]]},{"id":"thistle","name":"薊花","en":"Thistle","size":23,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"recolorPetals":true,"artSize":[48,62],"stemWidth":1.9,"colors":[["藍紫","#8d98bf"],["淡紫","#b3a0c2"]]},{"id":"cotton","name":"棉花","en":"Cotton","stemColor":"#84694c","stemWidth":2.4,"size":35.2,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"blueKey":true,"artAnchorX":0.5140664961636828,"artSize":[99,132],"colors":[["棉白","#fcfaf2"]]},{"id":"butterflyranunculus","name":"蝴蝶陸蓮","en":"Butterfly ranunculus","size":25.5,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artAnchorX":0.4847457627118644,"recolorPetals":true,"artSize":[80.75,123.25],"colors":[["柔粉","#efbec7"],["奶白","#fcfaf2"],["淡黃","#ecd88d"]]},{"id":"silverdollareucalyptus","name":"大圓葉尤加利","en":"Silver dollar eucalyptus","size":34,"foliage":true,"colors":[["銀綠","#8b9e8d"]]},{"id":"gypsophila","name":"滿天星","keepAspect":true,"artAnchorX":0.535473,"en":"Baby’s breath","size":33,"extra":true,"newAtlas":true,"artSize":[94,126],"colors":[["白色","#fcfaf2"]]},{"id":"oncidium","name":"文心蘭","keepAspect":true,"artAnchorX":0.401141,"en":"Oncidium","size":32,"extra":true,"newAtlas":true,"artSize":[88,150],"colors":[["黃色","#ebcb62"]]},{"id":"buttonmum","name":"鈕扣菊","en":"Button mum","size":15,"extra":true,"colors":[["黃綠","#cad88c"],["黃色","#e8ca69"],["奶白","#fcfaf2"]]},{"id":"dianthus","name":"深山櫻","en":"Japanese dianthus","size":35,"extra":true,"colors":[["淡粉","#efc5cf"],["白色","#fcfaf2"]]},{"id":"delphinium","name":"飛燕草","en":"Delphinium","size":28,"extra":true,"colors":[["藍紫","#9299d5"]]},{"id":"fountaingrass","name":"狼尾","en":"Fountain grass","size":26,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artAnchorX":0.488,"artSize":[40,180],"colors":[["原色","#ccb67d"],["霧粉","#e7d6dc"]]},{"id":"birdnestfern","name":"山蘇","en":"Bird’s nest fern","size":38,"artSize":[65,170],"colors":[["葉綠","#6f8759"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"fishtailfern","name":"魚尾山蘇","en":"Fishtail fern","size":38,"artSize":[88,155],"colors":[["葉綠","#6f8759"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"fiddlephilodendron","name":"琴葉蔓綠絨","en":"Fiddle-leaf philodendron","size":38,"artSize":[96,150],"colors":[["葉綠","#6f8759"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"irisleaf","name":"龍文蘭","en":"Variegated strap leaves","size":38,"artSize":[80,205],"colors":[["葉綠","#6f8759"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"asparagusfern","name":"文竹","en":"Asparagus fern","size":38,"artSize":[120,156],"colors":[["葉綠","#6f8759"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"dustymiller","name":"銀葉菊","en":"Dusty miller","size":38,"artSize":[100,145],"colors":[["銀綠","#b7c0b3"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.8},{"id":"birch","name":"樺木","en":"Birch","size":38,"artSize":[110,180],"colors":[["葉綠","#567849"]],"leafMaterial":true,"stemWidth":1.8,"foliage":true},{"id":"angelphilodendron","name":"天使蔓綠絨","en":"Lacy tree philodendron","size":43,"artSize":[110,140],"colors":[["葉綠","#6b8458"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":2},{"id":"silveroak","name":"銀樺木","en":"Silky oak foliage","size":38,"artSize":[98,175],"colors":[["葉綠","#b6b9a4"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":1.5},{"id":"fatsia","name":"八角葉","en":"Fatsia","size":43,"artSize":[120,128],"colors":[["葉綠","#45613b"]],"extra":true,"vectorLeaf":true,"leafMaterial":true,"stemWidth":2},{"id":"fern","name":"羊齒","en":"Fern","size":38,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"leafMaterial":true,"artAnchorX":0.4701298701298701,"artSize":[85,160],"colors":[["葉綠","#82936e"]]},{"id":"foxtail","name":"狗尾草","en":"Foxtail grass","size":16,"extra":true,"colors":[["草綠","#a2ae72"]]},{"id":"chamomile","name":"洋甘菊","en":"Chamomile","size":17,"extra":true,"newAtlas":true,"artSize":[76,80],"colors":[["白黃","#eee8cd"]]},{"id":"bluestar","name":"藍星花","en":"Blue star","size":20,"extra":true,"newAtlas":true,"artSize":[78,85],"colors":[["淡藍","#9bbfda"]]},{"id":"lavender","name":"薰衣草","en":"Lavender","size":18,"extra":true,"newAtlas":true,"artSize":[38,140],"colors":[["紫色","#a597c4"]]},{"id":"hydrangea","name":"繡球花","en":"Hydrangea","size":48,"extra":true,"newAtlas":true,"artSize":[112,100],"colors":[["藍紫","#a9afd7"],["粉色","#e4b3c7"],["奶白","#fcfaf2"],["淺綠","#c6d7ae"]]},{"id":"anthurium","name":"火鶴","en":"Anthurium","size":34,"extra":true,"newAtlas":true,"artSize":[80,94],"colors":[["經典紅","#c83642"],["白色","#fcfaf2"],["紫色","#9867ae"]]},{"id":"pointedeucalyptus","name":"尖葉尤加利","en":"Willow eucalyptus","size":30,"foliage":true,"colors":[["灰綠","#829c8d"]]},{"id":"monstera","name":"龜背芋","en":"Monstera","size":54,"extra":true,"leafAtlas":true,"artSize":[125,145],"colors":[["深綠","#537b58"]]},{"id":"cedar","name":"雪松","en":"Cedar","size":35,"foliage":true,"colors":[["松綠","#829682"]]},{"id":"eucalyptus","name":"小圓葉尤加利","en":"Eucalyptus","size":25,"foliage":true,"colors":[["灰綠","#8b9e8d"]]},{"id":"birdofparadise","artAnchorX":0.3800666317715875,"name":"天堂鳥","en":"Bird of paradise","size":55.2,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artSize":[129.6,173.98],"stemWidth":4,"colors":[["橘藍","#e7a146"]]},{"id":"celosia","artAnchorX":0.49727800155084345,"name":"雞冠花","en":"Cockscomb","size":34,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artSize":[86,78],"stemWidth":2.3,"colors":[["酒紅","#a3445e"]]},{"id":"waxflower","artAnchorX":0.5395832374390508,"name":"臘梅","en":"Waxflower","size":30,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artSize":[86,142],"stemColor":"#8b8064","stemWidth":1.6,"recolorPetals":true,"colors":[["淡粉","#f2d9e2"]]},{"id":"astilbe","artAnchorX":0.44077907197702554,"name":"泡盛","en":"Astilbe","size":30,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artSize":[80,145],"stemWidth":1.6,"colors":[["淡粉","#e5c6cf"]]},{"id":"greendianthus","artKey":"greendianthus-simple","artAnchorX":0.4927478580808048,"name":"綠石竹","en":"Green dianthus","size":28,"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"artSize":[72,72],"stemWidth":2,"colors":[["全綠","#9bae60"],["有小花","#e7d9df"]]},{"id":"stock","name":"紫羅蘭","en":"Stock","size":28,"artSize":[78,140],"stemWidth":2,"colors":[["淡紫","#ab97bf"]],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"blueKey":true,"recolorPetals":true,"artAnchorX":0.506919924729277},{"id":"statice","name":"星辰","en":"Statice","size":29,"artSize":[95,115],"stemWidth":1.7,"colors":[["深紫","#705693"],["淺紫","#b7a2cb"],["白色","#fcfaf2"]],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"blueKey":true,"recolorPetals":true,"artAnchorX":0.5219477260346437},{"id":"scabiosa","name":"松蟲草","en":"Scabiosa","size":30,"artSize":[76,70],"stemWidth":1.7,"colors":[["淺紫","#b9accf"],["粉色","#d4a0ba"],["深紅","#8b3548"],["深紫","#68517e"]],"extra":true,"newAtlas":true,"keepAspect":true,"spray":true,"blueKey":true,"recolorPetals":true,"artAnchorX":0.4937194116570234}];
+const FOLIAGE_TYPES = new Set(["cedar","eucalyptus","pointedeucalyptus","silverdollareucalyptus","monstera","fern","birdnestfern","fishtailfern","fiddlephilodendron","irisleaf","asparagusfern","dustymiller","birch","angelphilodendron","fatsia","silveroak"]);
+const FILLER_TYPES = new Set(["minirose","laceflower","sweetpea","gomphrena","lilyofthevalley","stock","statice","scabiosa","celosia","waxflower","astilbe","greendianthus","thistle","buttonmum","dianthus","chamomile","bluestar","lavender","delphinium","foxtail","gypsophila","oncidium","butterflyranunculus","fountaingrass"]);
+const VASE_SIZES = {"urnlow":[55,61,650,"20"],"urnhigh":[55,61,685,"26"],"classic":[58,66,650,"18"],"petite":[22,66,650,"18"],"slim":[42,48,600,"13"],"bud":[14,48,600,"13"],"columnlow":[23,29,650,"18"],"columnhigh":[23,46,700,"27"],"paper":[82,86,666,"28"],"mug":[48,48,600,"10"],"bowl":[80,80,565,"7"],"canvaswrap":[82,86,712,"28"],"naked":[18,40,655,"18"],"television":[84,151,636,"25"],"poodle":[27,70,640,"24"],"typewriter":[42,130,645,"20"],"swing":[65,203,598,"10"]};
+const VASE_COLORS = {"ivory":{"name":"米白色","body":"#e1dbcf","edge":"#c7beaf","rim":"#c9c0b2","inside":"#818975"},"gray":{"name":"淺灰色","body":"#c1c1bf","edge":"#a6a7a5","rim":"#aeafac","inside":"#6f746c"},"black":{"name":"黑色","body":"#343633","edge":"#252724","rim":"#50534e","inside":"#20251f"}};
+const BACKGROUND_COLORS = {"default":{"color":"#d8d8d8","dark":false},"charcoal":{"color":"#292929","dark":true}};
+const VESSEL_NAMES = {"urnlow":"Goblet Low","urnhigh":"Goblet Tall","classic":"Classic","petite":"Slim Neck","slim":"Mini","bud":"Mini Neck","columnlow":"Slender Low","columnhigh":"Slender Tall","paper":"Paper","canvaswrap":"Canvas","naked":"Naked","mug":"Mug","bowl":"Bowl","television":"Vintage TV","poodle":"Poodle","typewriter":"Typewriter","swing":"Swing"};
+const SPECIAL_VESSELS = {"urnlow":{"base":486,"bottom":655,"frame":"245 456 170 214"},"urnhigh":{"base":446,"bottom":690,"frame":"240 414 180 285"},"canvaswrap":{"base":543,"bottom":697,"frame":"130 140 400 600"},"naked":{"base":515,"bottom":640,"frame":"230 400 200 290"},"television":{"base":506,"bottom":644,"frame":"133 225 370 430"},"poodle":{"base":401,"bottom":643,"frame":"235 370 190 285"},"typewriter":{"base":493,"bottom":651,"frame":"185 420 290 245"},"swing":{"base":465.68,"bottom":605,"frame":"100 180 460 480"}};
+function materialCategory(d){return FOLIAGE_TYPES.has(d.id)?'foliage':FILLER_TYPES.has(d.id)?'filler':'main'}
+function vesselCategory(key){return ['paper','canvaswrap','naked'].includes(key)?'bouquet':['mug','television','poodle','typewriter','swing'].includes(key)?'imagination':'vessel'}
+function wrappedVessel(key){return key==='paper'||key==='canvaswrap'}
+module.exports={DATA,FOLIAGE_TYPES,FILLER_TYPES,VASE_SIZES,VASE_COLORS,BACKGROUND_COLORS,VESSEL_NAMES,SPECIAL_VESSELS,materialCategory,vesselCategory,wrappedVessel};
+
+return module.exports;
+})({exports:{}});
+__modules['vases'] = (function(module, exports){
+// 花瓶绘制：移植自网页版 app.js（SVG → Canvas）
+const { pathTo } = require('./svgpath.js');
+const { VASE_SIZES, VASE_COLORS, SPECIAL_VESSELS } = require('./flowers-data.js');
+
+function shade(hex, n) {
+  return '#' + hex.slice(1).match(/../g).map(x =>
+    Math.max(0, Math.min(255, parseInt(x, 16) + n)).toString(16).padStart(2, '0')).join('');
+}
+
+function stemBase(vase) {
+  if (SPECIAL_VESSELS[vase]) return SPECIAL_VESSELS[vase].base;
+  if (vase === 'paper') return 543;
+  if (vase === 'bowl') return 494;
+  if (vase === 'columnhigh') return 456;
+  if (vase === 'columnlow') return 486;
+  return vase === 'petite' || vase === 'bud' ? 492 : 500;
+}
+
+function vaseShadow(vase) {
+  if (SPECIAL_VESSELS[vase]) {
+    const spec = SPECIAL_VESSELS[vase];
+    const body = VASE_SIZES[vase][1];
+    return { cy: spec.bottom, rx: body * 1.2, ry: 10 };
+  }
+  if (vase === 'mug' || vase === 'bowl') return { cy: VASE_SIZES[vase][2] + 5, rx: vase === 'bowl' ? 62 : 64, ry: 9 };
+  if (vase === 'paper' || vase === 'canvaswrap') return { cy: 687, rx: 103.155, ry: 10 };
+  return { cy: VASE_SIZES[vase][2] + 5, rx: VASE_SIZES[vase][1] * 1.5, ry: 14 };
+}
+
+function wrappedVessel(key) { return key === 'paper' || key === 'canvaswrap'; }
+
+// 水平渐变（对应网页 vaseSurface 的 linearGradient）
+function vaseGrad(ctx, p, x0, x1) {
+  const g = ctx.createLinearGradient(x0, 0, x1, 0);
+  g.addColorStop(0, shade(p.body, -10));
+  g.addColorStop(0.28, shade(p.body, 6));
+  g.addColorStop(0.55, p.body);
+  g.addColorStop(0.8, shade(p.body, -5));
+  g.addColorStop(1, shade(p.body, -16));
+  return g;
+}
+
+function fill(ctx, d, style, stroke, sw) {
+  ctx.beginPath();
+  pathTo(ctx, d);
+  if (style) { ctx.fillStyle = style; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = sw || 1; ctx.stroke(); }
+}
+function strokeOnly(ctx, d, color, sw, cap) {
+  ctx.beginPath();
+  pathTo(ctx, d);
+  ctx.strokeStyle = color; ctx.lineWidth = sw;
+  if (cap) ctx.lineCap = cap;
+  ctx.stroke();
+}
+function ell(ctx, cx, cy, rx, ry, style) {
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = style; ctx.fill();
+}
+
+// ---- 标准参数化瓶 ----
+function standardBodyPath(key) {
+  const [neck, body, bottom] = VASE_SIZES[key];
+  const narrow = key === 'petite' || key === 'bud';
+  const lip = narrow ? 5 : 8;
+  const mouth = key === 'columnhigh' ? 456 : 486;
+  const shoulder = narrow ? 528 : 505;
+  const left = 330 - neck, right = 330 + neck;
+  if (key === 'columnhigh') return 'M307 456 A23 8 0 0 0 353 456 L376 664 C379 686 362 700 330 700 C298 700 281 686 284 664 Z';
+  return `M${left} ${mouth} A${neck} ${lip} 0 0 0 ${right} ${mouth} L${right} ${narrow ? 508 : 490} C${right} ${shoulder} ${330 + body} ${shoulder} ${330 + body} ${bottom - 43} Q${330 + body} ${bottom} ${330 + body - 22} ${bottom} L${330 - body + 22} ${bottom} Q${330 - body} ${bottom} ${330 - body} ${bottom - 43} C${330 - body} ${shoulder} ${left} ${shoulder} ${left} ${narrow ? 508 : 490} Z`;
+}
+function drawStandard(ctx, key, p, layer) {
+  const [neck, body] = VASE_SIZES[key];
+  const narrow = key === 'petite' || key === 'bud';
+  const lip = narrow ? 5 : 8;
+  const mouth = key === 'columnhigh' ? 456 : 486;
+  if (layer === 'back') {
+    ell(ctx, 330, mouth, neck, lip, p.rim);
+    ell(ctx, 330, mouth, neck - 4, lip - 2, p.inside);
+    return;
+  }
+  fill(ctx, standardBodyPath(key), vaseGrad(ctx, p, 330 - body - 8, 330 + body + 8), p.edge, 1);
+  const left = 330 - neck, right = 330 + neck, inner = neck - 4;
+  fill(ctx, `M${left} ${mouth} A${neck} ${lip} 0 0 0 ${right} ${mouth} L${330 + inner} ${mouth} A${inner} ${lip - 2} 0 0 1 ${330 - inner} ${mouth} Z`, p.rim);
+}
+
+// ---- 马克杯 / 碗 ----
+function drawEveryday(ctx, key, p, layer) {
+  const bowl = key === 'bowl';
+  const rx = bowl ? 80 : 48, ry = bowl ? 14 : 10;
+  const left = 330 - rx, right = 330 + rx;
+  if (layer === 'back') {
+    if (!bowl) fill(ctx, 'M373 508 C437 489 439 579 374 576 L374 567 C425 569 423 507 374 517 Z', shade(p.body, -5), p.edge, 1);
+    ell(ctx, 330, 486, rx, ry, p.rim);
+    ell(ctx, 330, 485, rx - 4, ry - 3, p.inside);
+    return;
+  }
+  const body = bowl
+    ? 'M250 486 A80 14 0 0 0 410 486 C405 526 382 548 350 559 L350 564 Q330 570 310 564 L310 559 C278 548 255 526 250 486 Z'
+    : 'M282 486 A48 10 0 0 0 378 486 L376 575 Q375 599 355 600 L305 600 Q285 599 284 575 Z';
+  fill(ctx, body, vaseGrad(ctx, p, left - 8, right + 8), p.edge, 1);
+  fill(ctx, `M${left} 486 A${rx} ${ry} 0 0 0 ${right} 486 L${right - 4} 486 A${rx - 4} ${ry - 3} 0 0 1 ${left + 4} 486 Z`, p.rim);
+}
+
+// ---- 高脚瓶 ----
+function drawUrn(ctx, key, p, layer) {
+  const y = key === 'urnhigh' ? 446 : 486, foot = key === 'urnhigh' ? 685 : 650;
+  if (layer === 'back') {
+    ell(ctx, 330, y, 59, 12, p.rim);
+    ell(ctx, 330, y - 1, 49, 8, p.inside);
+    return;
+  }
+  const g = vaseGrad(ctx, p, 271, 389), edge = p.edge, body = p.body;
+  fill(ctx, `M281 ${foot - 13}H379V${foot}H281Z`, g, edge, 1);
+  fill(ctx, `M304 ${foot - 13}Q320 ${foot - 30} 322 ${y + 106}H338Q340 ${foot - 30} 356 ${foot - 13}Z`, g, edge, 1);
+  fill(ctx, `M281 ${y}Q287 ${y + 21} 291 ${y + 58}Q294 ${y + 90} 318 ${y + 98}L319 ${y + 110}Q330 ${y + 117} 341 ${y + 110}L342 ${y + 98}Q366 ${y + 90} 369 ${y + 58}Q373 ${y + 21} 379 ${y}A49 8 0 0 1 281 ${y}Z`, g, edge, 1);
+  ctx.globalAlpha = 0.5;
+  for (const x of [-35, -21, -7, 7, 21, 35])
+    strokeOnly(ctx, `M${330 + x} ${y + 10}Q${330 + x * .8} ${y + 53} ${330 + x * .6} ${y + 78}Q${330 + x * .35} ${y + 94} 330 ${y + 98}`, shade(body, x % 2 ? -15 : 8), 3);
+  ctx.globalAlpha = 0.65;
+  for (const x of [-12, 0, 12])
+    strokeOnly(ctx, `M${330 + x * .35} ${y + 121}Q${330 + x * .6} ${foot - 37} ${330 + x} ${foot - 18}`, edge, 1);
+  ctx.globalAlpha = 1;
+  fill(ctx, `M271 ${y}A59 12 0 0 0 389 ${y}L379 ${y}A49 8 0 0 1 281 ${y}Z`, shade(body, 7), edge, 1);
+  strokeOnly(ctx, `M294 ${y + 63}Q330 ${y + 77} 366 ${y + 63}`, edge, 1);
+}
+
+// ---- 包花纸 ----
+const PAPER_LEFT = 'M245 300 C251 394 265 490 288 542 C302 563 319 577 330 584 C341 578 362 556 374 535 Q330 529 301 487 C271 448 254 368 245 300 Z';
+const PAPER_RIGHT = 'M415 300 C409 394 395 490 372 542 C355 563 338 577 328 584 Q321 587 320 578 C322 560 349 517 364 480 Q393 385 415 300 Z';
+function wrapTransform(ctx, key) {
+  ctx.translate(0, -25);
+  ctx.translate(330, 568);
+  ctx.scale(key === 'canvaswrap' ? 1.9771375 : 1.71925, 1.495);
+  ctx.translate(-330, -568);
+}
+function wrapOutline(key) {
+  return key === 'canvaswrap'
+    ? 'M248 278 Q330 306 412 278 L412 300 C406 399 392 492 369 530 L292 530 C271 493 257 395 248 300 Z'
+    : 'M245 278 Q330 306 415 278 L415 300 C409 394 395 490 372 542 Q351 574 330 588 Q306 567 288 542 C265 490 251 394 245 300 Z';
+}
+function drawPaper(ctx, p, layer) {
+  ctx.save();
+  wrapTransform(ctx, 'paper');
+  const g = vaseGrad(ctx, p, 245, 415);
+  if (layer === 'back') {
+    fill(ctx, 'M245 300 Q330 328 415 300 C409 394 395 490 372 542 Q351 574 330 588 Q306 567 288 542 C265 490 251 394 245 300 Z', shade(p.body, -16), p.edge, 0.6);
+  } else {
+    fill(ctx, 'M322 577 Q330 573 338 577 C353 583 357 598 358 616 L359 651 Q330 657 301 651 L302 616 C303 598 307 583 322 577 Z', g, p.edge, 0.6);
+    fill(ctx, PAPER_RIGHT, shade(p.body, -7), p.edge, 0.6);
+    fill(ctx, PAPER_LEFT, g, p.edge, 0.6);
+    ctx.globalAlpha = 0.3; ctx.lineCap = 'round';
+    strokeOnly(ctx, 'M314 562 Q324 574 330 580 M347 565 Q338 575 334 581 M328 587 Q326 598 323 606 M333 588 Q335 598 337 603', p.edge, 0.7);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+// ---- 帆布花束 ----
+function drawCanvasWrap(ctx, p, layer) {
+  ctx.save();
+  wrapTransform(ctx, 'canvaswrap');
+  const g = vaseGrad(ctx, p, 245, 415), edge = p.edge, body = p.body;
+  if (layer === 'back') {
+    fill(ctx, 'M245 300 Q286 325 330 319 Q379 325 415 300 C409 410 392 502 372 542 Q350 577 330 588 Q306 567 288 542 C267 490 251 394 245 300Z', shade(body, -17), edge, 0.6);
+  } else {
+    fill(ctx, 'M322 577Q330 573 338 577C354 584 359 610 359 650Q344 657 331 653Q315 658 301 651C302 616 304 587 322 577Z', g);
+    fill(ctx, 'M415 300C409 399 395 492 372 542Q352 568 330 584Q318 588 320 578C324 553 352 511 364 480Q392 389 415 300Z', shade(body, -6));
+    fill(ctx, 'M245 300C254 395 268 493 289 541Q309 566 330 584Q353 569 374 535C341 534 318 516 301 487Q264 437 245 300Z', g);
+    ctx.globalAlpha = 0.55;
+    ctx.setLineDash([1.2, 2]);
+    strokeOnly(ctx, 'M250 329Q260 441 295 526M407 331Q397 443 369 524', edge, 0.6);
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 0.32; ctx.lineCap = 'round';
+    strokeOnly(ctx, 'M301 552Q320 572 330 581M360 550Q340 574 332 582M322 592Q312 618 311 638M338 593Q349 618 349 639', edge, 1.2);
+    ctx.globalAlpha = 1;
+    // 蝴蝶结
+    ctx.save();
+    ctx.translate(330, 584); ctx.scale(1.914956516, 2.2022); ctx.translate(-330, -584);
+    fill(ctx, 'M328 583C316 576 306 562 303 571C298 584 317 588 328 585Z M332 583C344 576 354 562 357 571C362 584 343 588 332 585Z', '#faf9f4', '#d9d6cf', 0.7);
+    fill(ctx, 'M326 585Q321 596 310 607L310 600L304 601Q317 589 325 583Z M334 585Q339 596 350 607L350 600L356 601Q343 589 335 583Z', '#faf9f4', '#d9d6cf', 0.7);
+    ell(ctx, 330, 584, 5, 3.5, '#faf9f4');
+    ctx.restore();
+    // 布边纤维
+    ctx.globalAlpha = 0.8;
+    ctx.strokeStyle = edge; ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    for (let n = 0; n < 85; n++) {
+      const t = (n % 43) / 42, u = 1 - t, right = n > 42;
+      const x = right ? u * u * 330 + 2 * u * t * 379 + t * t * 415 : u * u * 245 + 2 * u * t * 286 + t * t * 330;
+      const y = right ? u * u * 319 + 2 * u * t * 325 + t * t * 300 : u * u * 300 + 2 * u * t * 325 + t * t * 319;
+      const dy = 2.2 + (n % 5) * .8;
+      ctx.moveTo(x, y + .4); ctx.lineTo(x + (n % 3 - 1) * .7, y + .4 - dy);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+// ---- 裸花束 ----
+function drawNaked(ctx, p, layer) {
+  ctx.save();
+  ctx.translate(0, -25);
+  if (layer === 'back') {
+    for (const [x, y, a, k] of [[-49, 486, -45, 1], [49, 486, 45, 1], [-26, 462, -22, .9], [28, 457, 25, .86], [-64, 514, -67, .8], [66, 515, 68, .82]]) {
+      ctx.save();
+      ctx.translate(330, 540); ctx.rotate(a * Math.PI / 180); ctx.scale(k * 1.4, k * 1.4);
+      fill(ctx, 'M0 0Q-32 -32 0 -91Q30 -31 0 0Z', a < 0 ? '#7f8c70' : '#929d7e');
+      strokeOnly(ctx, `M0 -3V-${119 * k}`, '#b1b8a1', 0.8);
+      ctx.restore();
+    }
+  } else {
+    for (let j = 0; j < 13; j++) {
+      const x = 319 + j * 1.8, end = 307 + j * 3.7;
+      strokeOnly(ctx, `M${x} 532Q${x + (j - 6) * .3} 590 ${end} ${647 + (j % 3) * 5}`, ['#79866a', '#909c7a', '#a0a88a'][j % 3], 3.2, 'round');
+    }
+    fill(ctx, 'M317 537Q330 542 343 537L344 547Q330 552 316 547Z', '#b6a58b');
+    strokeOnly(ctx, 'M317 540Q330 545 343 540M317 544Q330 549 343 544', '#95856f', 0.8);
+  }
+  ctx.restore();
+}
+
+// ---- 复古电视机 ----
+function drawTelevision(ctx, p, layer) {
+  ctx.save();
+  ctx.translate(-48, -40); ctx.translate(330, 526); ctx.scale(1.4, 1.4); ctx.translate(-330, -526);
+  const edge = p.edge, body = p.body, low = shade(body, -17), light = shade(body, 7);
+  const g = vaseGrad(ctx, p, 252, 459);
+  if (layer === 'back') {
+    roundRect(ctx, 252, 402, 207, 211, 15, g, edge);
+    roundRect(ctx, 264, 417, 132, 132, 5, low);
+    fill(ctx, 'M270 423H390V543H270Z', '#41463d');
+  } else {
+    ctx.globalAlpha = 0.48;
+    fill(ctx, 'M270 423H299L288 437L293 454L278 446L270 468Z', '#9eaaa3', '#c0c9bd', 0.8);
+    fill(ctx, 'M344 423H390V469L374 454L380 439L359 447Z', '#9eaaa3', '#c0c9bd', 0.8);
+    fill(ctx, 'M270 490L283 503L278 519L299 536L290 543H270Z', '#9eaaa3', '#c0c9bd', 0.8);
+    fill(ctx, 'M390 489L379 501L386 516L369 527L375 543H390Z', '#9eaaa3', '#c0c9bd', 0.8);
+    fill(ctx, 'M311 543L319 531L328 543Z', '#9eaaa3', '#c0c9bd', 0.8);
+    ctx.globalAlpha = 1;
+    strokeOnly(ctx, 'M270 423 279 423 273 441 286 450 272 462M390 428 381 445 389 459M270 514 282 530 278 543M390 509 377 526 385 543', '#aeb5a7', 1.3);
+    strokeOnly(ctx, 'M285 401 266 367M355 401 377 355', '#76786f', 2, 'round');
+    ell(ctx, 324, 401, 27, 5, low);
+    ctx.beginPath(); ctx.arc(428, 447, 12, 0, Math.PI * 2); ctx.fillStyle = low; ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 1; ctx.stroke();
+    strokeOnly(ctx, 'M422 453 434 441', light, 2);
+    ctx.beginPath(); ctx.arc(428, 483, 8, 0, Math.PI * 2); ctx.fillStyle = low; ctx.fill();
+    ctx.strokeStyle = low; ctx.lineWidth = 1.3; ctx.beginPath();
+    for (let j = 0; j < 7; j++) { ctx.moveTo(415, 514 + j * 5); ctx.lineTo(441, 514 + j * 5); }
+    ctx.stroke();
+    fill(ctx, 'M270 613 264 633h14l8 -20M422 613l7 20h13l-4 -20', low);
+    strokeOnly(ctx, 'M269 588h30', edge, 1);
+  }
+  ctx.restore();
+}
+function roundRect(ctx, x, y, w, h, r, style, stroke) {
+  ctx.beginPath();
+  pathTo(ctx, `M${x + r} ${y}H${x + w - r}Q${x + w} ${y} ${x + w} ${y + r}V${y + h - r}Q${x + w} ${y + h} ${x + w - r} ${y + h}H${x + r}Q${x} ${y + h} ${x} ${y + h - r}V${y + r}Q${x} ${y} ${x + r} ${y}Z`);
+  ctx.fillStyle = style; ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+// ---- 贵宾犬 ----
+function drawPoodle(ctx, p, layer) {
+  const edge = p.edge, body = p.body, low = shade(body, -17), light = shade(body, 7);
+  const torso = 'M297 472Q281 496 277 533Q261 559 263 593Q257 610 266 622Q279 636 299 625H361Q384 637 395 621Q402 607 395 590Q400 563 382 535Q380 497 363 472Z';
+  const head = 'M284 424Q279 413 288 409Q283 397 296 394Q296 381 310 384Q319 373 330 381Q343 374 351 385Q367 381 368 395Q381 398 375 410Q385 420 375 431Q380 450 366 463Q353 480 330 480Q305 480 291 463Q278 448 284 424Z';
+  if (layer === 'back') {
+    const g = vaseGrad(ctx, p, 257, 402);
+    fill(ctx, torso, g, edge, 1);
+    fill(ctx, 'M291 414Q273 410 268 431Q257 454 267 474Q266 488 279 492Q290 500 299 485L307 431Z M369 414Q387 410 392 431Q403 454 393 474Q394 488 381 492Q370 500 361 485L353 431Z', shade(body, -14), edge, 1);
+    fill(ctx, head, body, edge, 1);
+    fill(ctx, 'M305 537Q298 552 300 568L294 614Q281 634 304 638Q323 642 324 626L330 553L336 626Q337 642 356 638Q379 634 366 614L360 568Q362 552 355 537', body, edge, 1);
+    const eye = parseInt(body.slice(1, 3), 16) < 90 ? '#f3f1e9' : '#343730';
+    ell(ctx, 314, 437, 3.5, 3, eye);
+    ell(ctx, 346, 437, 3.5, 3, eye);
+    fill(ctx, 'M330 450Q316 442 306 452Q297 463 307 471Q318 480 330 474Q342 480 353 471Q363 463 354 452Q344 442 330 450Z', light);
+    fill(ctx, 'M321 451Q330 447 339 451Q341 457 330 462Q319 457 321 451Z', '#43463e');
+    ctx.lineCap = 'round';
+    strokeOnly(ctx, 'M330 462v5m0 0q-5 5-10 1m10-1q5 5 10 1', low, 1.1);
+    // 卷毛（裁剪在身体范围内）
+    ctx.save();
+    ctx.beginPath();
+    pathTo(ctx, torso);
+    pathTo(ctx, head);
+    ctx.clip();
+    let curls = '';
+    const locks = [[302, 401, 1], [320, 412, .8], [340, 412, .9], [355, 402, 1], [291, 422, .8], [366, 424, .8], [301, 449, .7], [358, 451, .8], [312, 481, 1], [333, 485, .9], [350, 484, .85], [297, 507, 1], [320, 509, 1], [343, 510, .9], [366, 510, .9], [285, 539, 1], [373, 541, 1], [278, 571, 1], [382, 573, 1], [310, 560, .8], [350, 559, .8], [307, 590, .9], [353, 591, .9], [280, 607, .8], [379, 608, .8]];
+    ctx.strokeStyle = edge; ctx.lineWidth = 0.8; ctx.lineCap = 'round'; ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    for (const [x, y, k] of locks) {
+      ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+      pathTo(ctx, 'M-5 0Q-9 -7 -3 -8Q3 -9 2 -3Q1 1 6 2Q11 3 9 8');
+      ctx.restore();
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 0.6;
+    strokeOnly(ctx, 'M277 436q-6 9 -3 18m5 -2q-6 11 -1 21m106 -37q6 9 3 18m-5 -2q6 11 1 21', edge, 1);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ell(ctx, 330, 397, 18, 5, p.rim);
+    ell(ctx, 330, 397, 15, 3.2, p.inside);
+  } else {
+    fill(ctx, 'M312 397A18 5 0 0 0 348 397L347 402Q330 408 313 402Z', body, edge, 0.7);
+  }
+}
+
+// ---- 打字机 ----
+function drawTypewriter(ctx, p, layer) {
+  ctx.save();
+  ctx.translate(330, 493); ctx.scale(1.2, 1.2); ctx.translate(-330, -493);
+  const edge = p.edge, body = p.body, low = shade(body, -17), light = shade(body, 7);
+  const g = vaseGrad(ctx, p, 221, 439);
+  if (layer === 'back') {
+    fill(ctx, 'M242 480h176v47H242Z', low);
+    roundRect(ctx, 250, 470, 160, 18, 8, '#565a52');
+    strokeOnly(ctx, 'M258 477h144', '#969b8c', 1);
+    fill(ctx, 'M252 489H408L428 580H232Z', g, edge, 1);
+    fill(ctx, 'M296 488Q330 474 364 488L360 512H300Z', p.inside);
+  } else {
+    fill(ctx, 'M250 511H410L439 595Q440 609 425 612H234Q220 610 221 596Z', g, edge, 1);
+    fill(ctx, 'M264 523H396L414 582H246Z', low);
+    for (let row = 0; row < 4; row++) {
+      for (let j = 0; j < 10 - row % 2; j++) {
+        const cx = 330 + (j - (9 - row % 2) / 2) * (13 + row * .5);
+        const cy = 537 + row * 12;
+        ctx.beginPath(); ctx.ellipse(cx, cy, 5.2, 3.8, 0, 0, Math.PI * 2);
+        ctx.fillStyle = light; ctx.fill();
+        ctx.strokeStyle = edge; ctx.lineWidth = 0.7; ctx.stroke();
+      }
+    }
+    roundRect(ctx, 282, 586, 95, 6, 2, low);
+    fill(ctx, 'M238 612v7h22v-7M402 612v7h22v-7', '#666b61');
+    strokeOnly(ctx, 'M251 506 259 500M416 594l10 -4', edge, 1);
+  }
+  ctx.restore();
+}
+
+function drawVase(ctx, key, palette, layer) {
+  if (key === 'urnlow' || key === 'urnhigh') return drawUrn(ctx, key, palette, layer);
+  if (key === 'mug' || key === 'bowl') return drawEveryday(ctx, key, palette, layer);
+  if (key === 'paper') return drawPaper(ctx, palette, layer);
+  if (key === 'canvaswrap') return drawCanvasWrap(ctx, palette, layer);
+  if (key === 'naked') return drawNaked(ctx, palette, layer);
+  if (key === 'television') return drawTelevision(ctx, palette, layer);
+  if (key === 'poodle') return drawPoodle(ctx, palette, layer);
+  if (key === 'typewriter') return drawTypewriter(ctx, palette, layer);
+  return drawStandard(ctx, key, palette, layer);
+}
+
+// 花茎裁剪：细长瓶瓶口 / 特殊容器开口
+function applyStemClip(ctx, vase) {
+  if (vase === 'columnlow' || vase === 'columnhigh') {
+    const mouth = stemBase(vase);
+    ctx.beginPath();
+    pathTo(ctx, `M-2000 -2000H2660V${mouth}H-2000Z`);
+    ctx.ellipse(330, mouth, 18, 5, 0, 0, Math.PI * 2);
+    ctx.clip();
+    return true;
+  }
+  const spec = { television: [84, 282, 342], poodle: [16, 330, stemBase('poodle') - 8], typewriter: [36, 330, stemBase('typewriter') - 9.6] }[vase];
+  if (spec) {
+    const [half, cx, top] = spec, base = stemBase(vase);
+    ctx.beginPath();
+    pathTo(ctx, `M-2000 -2000H2660V${top}H${cx + half}V${base + 2}H${cx - half}V${top}H-2000Z`);
+    ctx.clip();
+    return true;
+  }
+  return false;
+}
+
+// 包花纸：花材整体裁剪进包装轮廓
+function applyWrapClip(ctx, vase) {
+  ctx.save();
+  wrapTransform(ctx, vase);
+  ctx.beginPath();
+  pathTo(ctx, wrapOutline(vase));
+  ctx.clip();
+}
+
+module.exports = { drawVase, stemBase, vaseShadow, applyStemClip, applyWrapClip, wrappedVessel, shade };
+
+return module.exports;
+})({exports:{}});
+__modules['renderer'] = (function(module, exports){
+// 场景渲染器：移植网页版 render() 的合成逻辑到小程序 Canvas 2D
+const { pathTo } = require('./svgpath.js');
+const vases = require('./vases.js');
+const { DATA, VASE_COLORS, BACKGROUND_COLORS } = require('./flowers-data.js');
+const MANIFEST = require('./manifest.js');
+
+const SCENE_W = 660, SCENE_H = 720;
+
+// 素材可能分布在不同分包（webp 单包 / png 三分包），以 manifest 的 p 字段为准
+function assetUrl(m) { return '../../miniprogram/' + (m.p || 'flowerpack') + '/assets/' + m.f; }
+
+// 烘焙变体表（与 tools/gen-flowers.js 一致）
+const BAKED_VARIANTS = {
+  sunflower: 3, kingprotea: 2, lily: 2, poppy: 3, waxflower: 2, astilbe: 2,
+  fountaingrass: 2, lilyofthevalley: 2, fishtailfern: 6, silveroak: 4,
+  irisleaf: 2, doublelisianthus: 2, chamomile: 4,
+};
+
+function modeOf(d) {
+  if (d.vectorHead) return 'head';
+  if (d.foliage) return 'foliage';
+  if (d.vectorLeaf) return 'whole';
+  if (d.extra || d.newAtlas || d.leafAtlas || d.vectorSpray) return 'hang';
+  return 'head';
+}
+function factor(h) { return Math.max(.8, Math.min(1, h / 160)); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function tint(hex, tone) {
+  if (Math.min(...hex.slice(1).match(/../g).map(v => parseInt(v, 16))) > 210) tone = Math.max(-.025, tone);
+  return '#' + hex.slice(1).match(/../g).map(x => {
+    const v = parseInt(x, 16);
+    return Math.round(tone > 0 ? v + (255 - v) * tone : v * (1 + tone)).toString(16).padStart(2, '0');
+  }).join('');
+}
+
+// ---- 花茎几何（移植 stemGeometry）----
+function stemGeometry(item, endY = -item.h + 8) {
+  const amplitude = Math.min(7, item.h * .028) * (item.bend ?? [1, -1, .8, -.75][item.variant % 4]);
+  const knee = Math.min(4, item.h * .016) * (item.knee ?? .2);
+  const x = t => amplitude * Math.sin(Math.PI * t) + knee * Math.sin(2 * Math.PI * t);
+  const dx = t => amplitude * Math.PI * Math.cos(Math.PI * t) + 2 * Math.PI * knee * Math.cos(2 * Math.PI * t);
+  let path = 'M0 0';
+  for (let n = 0; n < 5; n++) {
+    const a = n / 5, b = (n + 1) / 5, dt = (b - a) / 3;
+    path += ` C${x(a) + dx(a) * dt} ${endY * (a + dt)} ${x(b) - dx(b) * dt} ${endY * (b - dt)} ${x(b)} ${endY * b}`;
+  }
+  return {
+    path,
+    xAt: y => x(clamp(y / endY, 0, 1)),
+    angleAt: y => -Math.atan(dx(clamp(y / endY, 0, 1)) / endY) * 180 / Math.PI,
+  };
+}
+
+function assetKey(type, color, variant) {
+  const n = BAKED_VARIANTS[type];
+  const base = `${type}_c${color}`;
+  if (!n) return base;
+  return `${base}_v${variant % n}`;
+}
+
+class SceneRenderer {
+  constructor() {
+    this.images = {}; // key -> {img, ready}
+    this.onNeedRedraw = null;
+    this.canvas = null;
+  }
+  // Canvas 2D 必须由 canvas 节点创建图片对象（wx.createImage 在新版基础库已移除）
+  setCanvas(node) { this.canvas = node; }
+  createImage() {
+    if (this.canvas && this.canvas.createImage) return this.canvas.createImage();
+    if (typeof wx !== 'undefined' && wx.createImage) return wx.createImage();
+    return null;
+  }
+  ensure(key) {
+    const m = MANIFEST[key];
+    if (!m) return null;
+    if (!this.images[key]) {
+      const rec = { img: null, ready: false };
+      const img = this.createImage();
+      if (!img) return null;
+      img.onload = () => { rec.ready = true; this.onNeedRedraw && this.onNeedRedraw(); };
+      img.onerror = () => { console.warn('[插花] 素材加载失败:', key); };
+      img.src = assetUrl(m);
+      rec.img = img;
+      this.images[key] = rec;
+    }
+    return this.images[key];
+  }
+  preload(keys) { for (const k of keys) this.ensure(k); }
+
+  // ---- 单枝花：返回 {stems: [...], front: [...]} 由调用方按层绘制 ----
+  drawItem(ctx, d, item, layer) {
+    const mode = modeOf(d);
+    const color = tint(d.colors[item.color][1], item.tone || 0);
+    ctx.save();
+    ctx.translate(item.x - (this.vase === 'television' ? 48 : 0), vases.stemBase(this.vase));
+    ctx.rotate(item.a * Math.PI / 180);
+    if (mode === 'head') this.drawHead(ctx, d, item, color, layer);
+    else if (mode === 'hang') this.drawHang(ctx, d, item, color, layer);
+    else if (mode === 'whole') this.drawWhole(ctx, d, item, color, layer);
+    else this.drawFoliage(ctx, d, item, color, layer);
+    ctx.restore();
+  }
+
+  drawStemPath(ctx, item, endY, color, width) {
+    ctx.beginPath();
+    pathTo(ctx, stemGeometry(item, endY).path);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.stroke();
+  }
+
+  drawImageKey(ctx, key, dx, dy, w, h, mirror) {
+    const m = MANIFEST[key];
+    const rec = this.ensure(key);
+    if (!m || !rec || !rec.ready) return;
+    if (mirror) { ctx.save(); ctx.scale(-1, 1); }
+    ctx.drawImage(rec.img, dx, dy, w, h);
+    if (mirror) ctx.restore();
+  }
+
+  // 花头类：花茎 + 顶部花头图
+  drawHead(ctx, d, item, color, layer) {
+    const key = assetKey(d.id, item.color, item.variant);
+    const m = MANIFEST[key];
+    if (!m) return;
+    const k = item.scale;
+    let tip;
+    if (d.id === 'lisianthus') tip = item.h - 48.4 * k;
+    else if (d.id === 'tulip') tip = item.h - d.size * 2.15 * .44 * k;
+    else if (d.id === 'carnation') tip = item.h - d.size * .9 * k;
+    else tip = item.h - 8;
+    if (layer === 'stem') {
+      this.drawStemPath(ctx, item, -tip, d.stemColor || '#7e8d70', d.stemWidth || 2.1);
+      return;
+    }
+    const TILT = [0, -7, 5, -3], SX = [1, .97, 1.04, .98], SY = [1, 1.03, .96, 1.02];
+    const v = BAKED_VARIANTS[d.id] ? 0 : item.variant % 4; // 烘焙变体的花型差异已含在图里
+    ctx.save();
+    ctx.translate(0, -item.h);
+    ctx.rotate(TILT[v] * Math.PI / 180);
+    ctx.scale(SX[v], SY[v]);
+    this.drawImageKey(ctx, key, -m.ax * m.w * k, -m.ay * m.h * k, m.w * k, m.h * k);
+    ctx.restore();
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -item.h, Math.max(36, m.w * k * .55));
+  }
+
+  // 吊挂类（extra/newAtlas/vectorSpray）：花茎 + 从枝顶垂下的整束图
+  drawHang(ctx, d, item, color, layer) {
+    const key = assetKey(d.id, item.color, item.variant);
+    const m = MANIFEST[key];
+    if (!m) return;
+    const k = item.scale * factor(item.h);
+    const artH = m.h * k;
+    const tip = item.h - artH * .96;
+    if (layer === 'stem') {
+      this.drawStemPath(ctx, item, -tip, d.stemColor || '#7e8d70', d.stemWidth || 2.1);
+      return;
+    }
+    const ANGLE = [0, -3, 3, -1];
+    const mirror = (d.id === 'birdofparadise' && item.variant % 2 === 1) ||
+      (d.id === 'lilyofthevalley' && item.variant >= 2);
+    ctx.save();
+    ctx.translate(0, -item.h);
+    ctx.rotate((ANGLE[item.variant % 4] || 0) * Math.PI / 180);
+    this.drawImageKey(ctx, key, -m.ax * m.w * k, -m.ay * m.h * k, m.w * k, m.h * k, mirror);
+    ctx.restore();
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -item.h + artH * .4, Math.max(36, m.w * k * .5));
+  }
+
+  // 整株类（vectorLeaf）：含茎整图，x/y 非均匀缩放
+  drawWhole(ctx, d, item, color, layer) {
+    if (layer === 'stem') return; // 茎已含在烘焙图里
+    const key = assetKey(d.id, item.color, item.variant);
+    const m = MANIFEST[key];
+    if (!m) return;
+    // 与 newLeafMarkup 的 scale 对应：烘焙于 h=160（factor=1）
+    const kx = item.scale * factor(item.h);
+    const ky = item.scale * (d.artSize ? d.artSize[1] : m.h) * factor(item.h) / 160;
+    const ROT = [0, -5, 4, -2, 8, -8];
+    const v = BAKED_VARIANTS[d.id] ? 0 : item.variant % 6; // 烘焙变体的旋转已含在图里
+    ctx.save();
+    ctx.translate(0, -item.h);
+    ctx.rotate((ROT[v] || 0) * Math.PI / 180);
+    this.drawImageKey(ctx, key, -m.ax * m.w * kx, -m.ay * m.h * ky, m.w * kx, m.h * ky);
+    ctx.restore();
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -item.h + m.h * ky * .4, Math.max(36, m.w * kx * .5));
+  }
+
+  // 枝叶类：枝干 + 叶片零件实时拼装
+  drawFoliage(ctx, d, item, color, layer) {
+    if (d.id === 'birch') return this.drawRuscus(ctx, item, color, layer);
+    if (d.id === 'silverdollareucalyptus') return this.drawLargeRound(ctx, item, layer);
+    const h = item.h, tipY = -h + 18, curve = stemGeometry(item, tipY);
+    if (layer === 'stem') {
+      ctx.beginPath();
+      pathTo(ctx, curve.path);
+      ctx.strokeStyle = vases.shade(color, -25);
+      ctx.lineWidth = d.id === 'cedar' ? 1.8 : 1.4;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      return;
+    }
+    let n = 0;
+    const step = d.id === 'eucalyptus' ? 24 : d.id === 'pointedeucalyptus' ? 32 : 40;
+    for (let y = -48; y > tipY + 10; y -= step) {
+      const fraction = clamp(-y / h, 0, 1), taper = 1 - .42 * fraction;
+      const angle = curve.angleAt(y);
+      if (d.id === 'cedar') {
+        for (const side of [-1, 1]) {
+          const width = (48 + Math.sin(n * 2 + item.variant) * 5) * item.scale * taper;
+          const spread = side * (35 + ((n + item.variant) % 3) * 8);
+          ctx.save();
+          ctx.globalAlpha = 1 - Math.max(0, item.tone || 0) * .45;
+          ctx.translate(curve.xAt(y + side * 4), y + side * 4);
+          ctx.rotate((angle + spread) * Math.PI / 180);
+          this.drawPiece(ctx, 'cedar', 0, 0, width);
+          ctx.restore();
+        }
+      } else {
+        const kind = d.id === 'pointedeucalyptus' ? 'pointed' : 'eucalyptus';
+        const width = ((d.id === 'pointedeucalyptus' ? 56 : 38) + Math.sin(n + item.variant) * 3) * item.scale * taper;
+        ctx.save();
+        ctx.translate(curve.xAt(y), y);
+        ctx.rotate(angle * Math.PI / 180);
+        ctx.scale(n % 2 ? -1 : 1, .78 + (n % 3) * .08);
+        this.drawPiece(ctx, kind, 0, 0, width);
+        ctx.restore();
+      }
+      n++;
+    }
+    const tipKind = { cedar: 'cedar-tip', eucalyptus: 'eucalyptus-tip', pointedeucalyptus: 'pointed-tip' }[d.id];
+    const topWidth = (d.id === 'cedar' ? 24 : d.id === 'pointedeucalyptus' ? 28 : 19) * item.scale;
+    ctx.save();
+    ctx.translate(curve.xAt(tipY), tipY);
+    ctx.rotate(curve.angleAt(tipY) * Math.PI / 180);
+    this.drawPiece(ctx, tipKind, 0, 0, topWidth);
+    ctx.restore();
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -h + 35, Math.max(36, 65 * item.scale));
+  }
+
+  // 大圆叶尤加利
+  drawLargeRound(ctx, item, layer) {
+    const tipY = -item.h + 18, curve = stemGeometry(item, tipY);
+    if (layer === 'stem') {
+      ctx.beginPath();
+      pathTo(ctx, curve.path);
+      ctx.strokeStyle = '#7f8065'; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+      ctx.stroke();
+      return;
+    }
+    const gaps = [35, 29, 41, 32], sizes = [44, 38, 46, 40], sides = [1, -1, 1, 1, -1], angles = [-12, 17, -4, 22, 7];
+    let n = 0;
+    for (let y = -38; y > tipY + 24;) {
+      const k = n + item.variant;
+      const width = sizes[k % sizes.length] * item.scale * (1 - .18 * Math.min(1, -y / item.h));
+      ctx.save();
+      ctx.translate(curve.xAt(y), y);
+      ctx.rotate((curve.angleAt(y) + angles[k % angles.length]) * Math.PI / 180);
+      ctx.scale(sides[k % sides.length], 1);
+      this.drawPiece(ctx, 'silver-dollar-single', 0, 0, width);
+      ctx.restore();
+      y -= gaps[(n + item.variant) % gaps.length]; n++;
+    }
+    ctx.save();
+    ctx.translate(curve.xAt(tipY), tipY);
+    ctx.rotate((26 + item.variant * 3) * Math.PI / 180);
+    this.drawPiece(ctx, 'silver-dollar-single', 0, 0, 27 * item.scale);
+    ctx.restore();
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -item.h + 35, Math.max(36, 65 * item.scale));
+  }
+
+  // 桦木（ruscusBranch，纯路径）
+  drawRuscus(ctx, item, color, layer) {
+    const tip = -item.h + 20, curve = stemGeometry(item, tip), v = item.variant;
+    const leafPath = 'M0 0C-22 -14 -24 -42 5 -61C7 -42 31 -23 0 0Z';
+    const veinPath = 'M0 -1Q4 -31 5 -57M0 -12Q-9 -29 -7 -43M3 -14Q15 -31 8 -45';
+    if (layer === 'stem') {
+      ctx.beginPath();
+      pathTo(ctx, curve.path);
+      ctx.strokeStyle = vases.shade(color, -15); ctx.lineWidth = 1.8;
+      ctx.stroke();
+      return;
+    }
+    let j = 0;
+    const drawLeaf = (x, y, rot, k, flip) => {
+      ctx.save();
+      ctx.translate(x, y); ctx.rotate(rot * Math.PI / 180); ctx.scale(flip * k, k);
+      ctx.beginPath(); pathTo(ctx, leafPath);
+      ctx.fillStyle = color; ctx.fill();
+      ctx.globalAlpha = .7;
+      ctx.beginPath(); pathTo(ctx, veinPath);
+      ctx.strokeStyle = vases.shade(color, 18); ctx.lineWidth = .65;
+      ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    };
+    for (let y = -38; y > tip + 30; y -= 30 + (j % 3) * 5) {
+      const side = (j + v) % 2 ? 1 : -1, k = (.75 + .1 * ((j + v) % 3)) * item.scale;
+      drawLeaf(curve.xAt(y), y, side * (26 + (j % 3) * 12) + curve.angleAt(y), k, side);
+      j++;
+    }
+    drawLeaf(curve.xAt(tip + 35), tip + 35, curve.angleAt(tip), .7 * item.scale, 1);
+    if (this.selectedId === item.id) this.drawRing(ctx, 0, -item.h + 35, Math.max(36, 65 * item.scale));
+  }
+
+  drawPiece(ctx, kind, x, y, width) {
+    const key = 'piece_' + kind;
+    const m = MANIFEST[key];
+    if (!m) return;
+    const k = width / m.w;
+    this.drawImageKey(ctx, key, x - m.ax * m.w * k, y - m.ay * m.h * k, m.w * k, m.h * k);
+  }
+
+  drawRing(ctx, cx, cy, r) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(74, 96, 68, .85)';
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([5, 4]);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---- 全场景 ----
+  render(ctx, state) {
+    const { items, selected, vase, vaseColor, backgroundColor } = state;
+    this.vase = vase;
+    this.selectedId = selected;
+    const palette = VASE_COLORS[vaseColor];
+    const bg = BACKGROUND_COLORS[backgroundColor] || BACKGROUND_COLORS.default;
+
+    ctx.fillStyle = bg.color;
+    ctx.fillRect(0, 0, SCENE_W, SCENE_H);
+
+    // 花瓶阴影
+    const sh = vases.vaseShadow(vase);
+    const grad = ctx.createRadialGradient(335, sh.cy, 1, 335, sh.cy, Math.max(sh.rx, 1));
+    grad.addColorStop(0, 'rgba(166,167,154,.25)');
+    grad.addColorStop(1, 'rgba(166,167,154,0)');
+    ctx.save();
+    ctx.translate(335, sh.cy);
+    ctx.scale(1, sh.ry / sh.rx);
+    ctx.beginPath();
+    ctx.arc(0, 0, sh.rx, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
+
+    vases.drawVase(ctx, vase, palette, 'back');
+
+    const wrapped = vases.wrappedVessel(vase);
+    if (wrapped) {
+      vases.applyWrapClip(ctx, vase);
+      for (const i of items) this.drawItem(ctx, DATA.find(d => d.id === i.type), i, 'stem');
+      for (const i of items) this.drawItem(ctx, DATA.find(d => d.id === i.type), i, 'front');
+      ctx.restore();
+    } else {
+      ctx.save();
+      const clipped = vases.applyStemClip(ctx, vase);
+      for (const i of items) this.drawItem(ctx, DATA.find(d => d.id === i.type), i, 'stem');
+      ctx.restore();
+      vases.drawVase(ctx, vase, palette, 'front');
+      ctx.save();
+      if (['television', 'poodle', 'typewriter'].includes(vase) && !['television', 'poodle'].includes(vase)) {
+        vases.applyStemClip(ctx, vase);
+      }
+      if (clipped && (vase === 'columnlow' || vase === 'columnhigh')) {
+        // 花头也在瓶口裁剪内（与网页一致：fronts 不裁剪，仅 stems 裁剪）
+      }
+      for (const i of items) this.drawItem(ctx, DATA.find(d => d.id === i.type), i, 'front');
+      ctx.restore();
+    }
+    if (wrapped) vases.drawVase(ctx, vase, palette, 'front');
+  }
+
+  // 场景坐标命中检测（自顶向下）
+  hitTest(items, sx, sy) {
+    const base = vases.stemBase(this.vase || 'classic');
+    for (let n = items.length - 1; n >= 0; n--) {
+      const i = items[n];
+      const d = DATA.find(dd => dd.id === i.type);
+      const mode = modeOf(d);
+      const cyOff = mode === 'foliage' ? 35 : 0;
+      const rad = i.a * Math.PI / 180;
+      const hh = i.h - cyOff;
+      const hx = i.x + Math.sin(rad) * hh;
+      const hy = base - Math.cos(rad) * hh;
+      const key = assetKey(i.type, i.color, i.variant);
+      const m = MANIFEST[key];
+      const r = Math.max(34, (m ? m.w * i.scale * .55 : 30));
+      if ((sx - hx) * (sx - hx) + (sy - hy) * (sy - hy) <= r * r) return i.id;
+    }
+    return null;
+  }
+}
+
+module.exports = { SceneRenderer, SCENE_W, SCENE_H, modeOf, factor, tint, assetKey, BAKED_VARIANTS };
+
+return module.exports;
+})({exports:{}});

@@ -334,9 +334,9 @@ function newBotanicalHead(type,color,variant=0){
    const a=j*360/34+row*5.3,len=41-row*10+Math.sin(j*2.3)*3;
    out+=`<path transform="rotate(${a})" d="M-2 -8 Q-5 -23 -2 -${len-5} Q0 -${len+3} 3 -${len} Q1 -${len-8} 3 -23 L2 -8Z" fill="${[color,light,dark][(j+row)%3]}"/>`;
   }
-  out+=looseFlowerCenter(color,variant);
+   out+=looseFlowerCenter(color,variant);
 
- }else if(type==='irisleaf'){i.variant=irisNext;irisNext=1-irisNext;}if(type==='poppy'){
+  }else if(type==='irisleaf'){i.variant=irisNext;irisNext=1-irisNext;}if(type==='poppy'){
   const stage=variant%3;
   if(stage===0){
    for(let j=0;j<5;j++)out+=`<path transform="rotate(${j*72+variant*4})" d="M0 6 C-12 5 -34 -6 -35 -23 Q-36 -31 -28 -32 Q-22 -39 -16 -35 Q-8 -39 -1 -33 Q8 -36 12 -29 C20 -13 11 1 0 6Z" fill="${[color,light,dark,color,light][j]}"/>`;
